@@ -4,9 +4,9 @@ Why this exists: an agent harness gives each shell tool call a time limit
 (Qwen Code: 120 s by default, 600 s at most), and a whole book takes hours.  The
 GPU handover must run in the FOREGROUND - while the LLM server is stopped the
 agent has no model to think with, so a backgrounded handover leaves the agent's
-next turn talking to a dead server (measured 2026-09-23: the harness gave up
-after two retries and exited, and its exit killed the handover before the
-server came back).  So one handover call does as many pages as fit in the
+next turn talking to a dead server (measured 2026-09-23: the harness retried the
+refused connection 7 times over about 76 s, gave up and exited, and its exit
+killed the handover before the server came back).  So one handover call does as many pages as fit in the
 budget, stops between pages, restores the server and says "call me again";
 sealed pages are skipped on the next call, so repeated calls finish the book.
 

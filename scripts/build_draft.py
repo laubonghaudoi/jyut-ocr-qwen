@@ -4,8 +4,9 @@
 The user no longer waits for the end of phase 3 to see the book.  They get it
 three times (SKILL.md, 分三次交付):
 
-1. draft.md, this script, as soon as both OCR engines are done: engine B's
-   text, page after page, no model asked.  Seconds, not hours.
+1. draft.md, this script, as soon as engine B is done and before engine A runs
+   (SKILL.md 〈OCR 工具次序〉 step 3): engine B's text, page after page, no
+   model asked.  Seconds, not hours.
 2. proofreading.md, scripts/build_progress.py, rebuilt while phase 3 runs:
    the pages sealed so far as proofread, every other page as in the draft.
 3. final.md and doubts.md, scripts/finish_book.py (SKILL.md 〈做完之後〉), once
@@ -48,7 +49,9 @@ Usage:
         [--output draft.md]
 
 Relative paths are taken inside BOOK.  One line is printed: the file, the
-page counts, the running heads learned.
+page counts, the running heads learned.  A second line names the copy beside
+the book's PDF, X-draft.md for X.pdf (scripts/_deliver.py; --no-deliver: none),
+or why none was written.
 """
 
 from __future__ import annotations
@@ -71,6 +74,7 @@ from typing import Iterable, Mapping, Sequence
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import proofread_pages as pp  # noqa: E402
+import _deliver  # noqa: E402
 
 DRAFT_NAME = "draft.md"
 OCR_DIRNAME = "ocr-hunyuan"
@@ -832,6 +836,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--ocr-dir", default=OCR_DIRNAME, help=f"engine B's pages (default {OCR_DIRNAME})")
     parser.add_argument("--manifest", default=MANIFEST_NAME, help=f"the page manifest (default {MANIFEST_NAME})")
     parser.add_argument("--output", default=DRAFT_NAME, help=f"the draft (default {DRAFT_NAME})")
+    parser.add_argument("--no-deliver", action="store_true",
+                        help="do not copy the draft beside the book's PDF as X-draft.md (scripts/_deliver.py: the "
+                             "PDF the page manifest names; a file there the pipeline did not write is left alone)")
     return parser
 
 
@@ -842,7 +849,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     output = inside(book, arguments.output)
     try:
         draft = draft_book(book, arguments.ocr_dir, arguments.manifest)
-        atomic_write(output, render_draft(draft, built_at()))
+        text = render_draft(draft, built_at())
+        atomic_write(output, text)
     except Exception as error:  # noqa: BLE001 - the draft never stops the pipeline
         print(f"[draft] NOT WRITTEN {output}: {type(error).__name__}: {error} - go on with the next step",
               flush=True)
@@ -859,6 +867,16 @@ def main(argv: Sequence[str] | None = None) -> int:
           f"{len(draft.heads)} running head(s) learned{f' ({heads})' if heads else ''}, furniture taken off "
           f"{cleaned} page(s)" + (f"; {draft.note}" if draft.note else "")
           + f" ({time.monotonic() - began:.1f}s)", flush=True)
+    if not arguments.no_deliver:
+        # The person's copy beside the PDF; it never stops the pipeline either.
+        try:
+            copy = _deliver.deliver(book, "draft", text.encode("utf-8"), _deliver.find_manifest(
+                book, inside(book, arguments.manifest)))
+            print(f"[draft] beside the PDF: {copy.path}" + (f" (the edited copy kept as {copy.kept_as})"
+                                                            if copy.kept_as else "")
+                  if copy.written else f"[draft] not copied beside the PDF: {copy.reason}", flush=True)
+        except Exception as error:  # noqa: BLE001
+            print(f"[draft] not copied beside the PDF: {type(error).__name__}: {error}", flush=True)
     return 0
 
 

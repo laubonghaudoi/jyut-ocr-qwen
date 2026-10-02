@@ -55,9 +55,16 @@ overwritten, and the RESULT line names the copy.  finish/written.json keeps
 the SHA-256 of what it wrote.  Nothing the command reads may lie in
 assembled/, which it moves aside when stale (exit 2).
 
-What an agent sees is one line and two paths.  stdout is exactly
+Beside the book's PDF (the one the page manifest names), final.md and
+doubts.md are copied as X.md and X-doubts.md for X.pdf (scripts/_deliver.py;
+--no-deliver: not).  A copy never replaces a file the pipeline did not write
+there, and one the person edited is moved aside first; a copy that cannot be
+written is a WARNING line, never a failure.
+
+What an agent sees is one line and the paths.  stdout is exactly
 `[finish] RESULT exit=N STATE finish_book.py: ...`, then `final.md: PATH` and
-`doubts.md: PATH` when they are written.  Every step's own output goes to
+`doubts.md: PATH` when they are written, then `final.md beside the PDF: PATH`
+and `doubts.md beside the PDF: PATH` for the copies written.  Every step's own output goes to
 BOOK/finish/finish-book.log, which also gets `[finish] step K of 4: ...`
 lines, and `WARNING ...` lines (counted in the RESULT line) for what the
 agent must pass on; scripts/wait_for_run.py BOOK LOG reads them while the run
@@ -104,6 +111,7 @@ from typing import Any, Callable, Iterator, Mapping, Sequence
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
+import _deliver  # noqa: E402
 
 EXIT_DONE, EXIT_FAILED, EXIT_USAGE, EXIT_NOT_READY, EXIT_STOPPED, EXIT_MODEL = 0, 1, 2, 3, 4, 6
 STATE = {EXIT_DONE: "DONE", EXIT_FAILED: "FAILED", EXIT_USAGE: "FAILED", EXIT_NOT_READY: "NOT READY",
@@ -166,6 +174,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--timeout", type=float, help="seconds one model request may take (default: repair_book.py's)")
     parser.add_argument("--workers", type=int, default=min(6, os.cpu_count() or 1),
                         help="CPU processes for the repair's book model and counters")
+    parser.add_argument("--no-deliver", action="store_true",
+                        help="do not copy final.md and doubts.md beside the book's PDF as X.md and X-doubts.md "
+                             "(scripts/_deliver.py: the PDF the page manifest names; a file there the pipeline did "
+                             "not write is left alone)")
     return parser
 
 
@@ -858,6 +870,9 @@ KINDS: dict[str, tuple[str, str]] = {
     "conflict": ("text", "兩個改動撞埋同一段字，淨係做咗先嗰個"),
     "MARK-STANDIN": ("text", "可能係引擎 B 代標點嘅字"),
     "MARK-FIGURE-LOST": ("text", "引擎 A 讀到嘅數字唔見咗"),
+    "run-one-engine": ("text", "數字、拉丁字或者假名淨係一個引擎讀到，頁面冇（冇寫入）"),
+    "run-engines-differ": ("text", "兩個引擎喺同一個位讀到唔同嘅數字或者拉丁字，頁面冇（冇寫入）"),
+    "run-no-place": ("text", "兩個引擎都讀到嘅數字或者拉丁字，頁面冇，但擺唔落（標點、結構對唔上）"),
     "arabic-figure-unwritten": ("text", "引擎 A 讀到嘅數字定咗要寫，但寫唔落佢個位"),
     "HEAD-NUMBER-LOST": ("text", "標題冇咗編號"),
     "TOC-NUMBER-LOST": ("text", "目錄項冇編號"),
@@ -887,6 +902,8 @@ KINDS: dict[str, tuple[str, str]] = {
     "MARK-UNBALANCED": ("marks", "括號或者引號唔成對"),
     "MARK-REVERSED": ("marks", "倒轉咗嘅括號「）（」"),
     "MARK-SHAPE": ("marks", "括號形狀可疑"),
+    "retry-marks-unverified": ("marks", "重試過嘅標點段：第一次答案同引擎 A 一樣，但寫唔返（引擎 B 唔同，或者嗰度有模型答案）"),
+    "note-markers-unverified": ("marks", "註號：引擎讀到嘅註號頁面冇，或者數值唔同（冇改）"),
     # structure
     "unit-not-in-scan": ("structure", "目錄有、正文搵唔到嘅篇"),
     "leaves-missing": ("structure", "頁碼跳咗，可能漏咗頁"),
@@ -1429,7 +1446,38 @@ def run(book: Path, arguments: argparse.Namespace, client: Any, report: dict[str
             if result.get("keptAs")]
     if kept:
         line += f"; the edited {' and '.join(kept)} kept (not in the new files)"
-    return EXIT_DONE, line, [f"{FINAL}: {book / FINAL}", f"{DOUBTS}: {book / DOUBTS}"]
+    outputs = [f"{FINAL}: {book / FINAL}", f"{DOUBTS}: {book / DOUBTS}"]
+    if not arguments.no_deliver:
+        outputs += deliver_beside_pdf(book, inputs, report, log)
+    return EXIT_DONE, line, outputs
+
+
+def deliver_beside_pdf(book: Path, inputs: Inputs, report: dict[str, Any], log: Log) -> list[str]:
+    """final.md and doubts.md copied beside the book's PDF as X.md and
+    X-doubts.md (scripts/_deliver.py), each `final.md` in the doubt list
+    reading X.md.  A copy that cannot be written is a WARNING line (the agent
+    passes it on) and never a failure: the book's own files stand."""
+    final = (book / FINAL).read_bytes()
+    pdf, _why = _deliver.source_pdf(book, inputs.page_manifest)
+    final_name = _deliver.copy_name(pdf, "final") if pdf is not None else FINAL
+    copies = [_deliver.deliver(book, "final", final, inputs.page_manifest),
+              _deliver.deliver(book, "doubts", _deliver.doubts_for_copy(
+                  (book / DOUBTS).read_text(encoding="utf-8"), final_name).encode("utf-8"), inputs.page_manifest)]
+    report["delivered"] = [{"kind": c.kind, "path": str(c.path) if c.path else None, "written": c.written,
+                            **({"reason": c.reason} if c.reason else {}), **({"keptAs": c.kept_as} if c.kept_as else {})}
+                           for c in copies]
+    lines = []
+    for copy in copies:
+        name = FINAL if copy.kind == "final" else DOUBTS
+        if copy.written:
+            lines.append(f"{name} beside the PDF: {copy.path}")
+            log.line(f"delivered {name} as {copy.path}")
+            if copy.kept_as:
+                log.warning(f"{copy.path.name} beside the PDF had been edited: kept as {copy.kept_as}; the new "
+                            f"{copy.path.name} does not hold those changes")
+        else:
+            log.warning(f"{name} {copy.line()}")
+    return lines
 
 
 def _now() -> str:

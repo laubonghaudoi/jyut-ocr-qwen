@@ -19,16 +19,25 @@ false` on its own: a low-ink page is a candidate for visual review, not a
 verified blank.
 
 Usage:
-    python3 scripts/survey_pdf.py SOURCE.pdf OUTPUT_DIR [--dpi 300]
+    python3 scripts/survey_pdf.py SOURCE.pdf OUTPUT_DIR [--dpi 300] [--jobs N]
+
+OUTPUT_DIR is the book folder: the renders go to OUTPUT_DIR/renders/, the two
+files beside them.  Rendering and measuring run --jobs processes at a time
+(default: the machine's CPUs); the renders, the manifest and the report are
+the same bytes whatever the number (render_runs says why), so a survey made
+in slices seals exactly what one made in one call would.
 """
 
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import functools
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -42,6 +51,13 @@ MANIFEST_NAME = "page-manifest.json"
 REPORT_NAME = "survey-report.json"
 RENDERS_DIRNAME = "renders"
 DEFAULT_DPI = 300
+# pdftoppm renders one page at a time on one core, and so does the measuring
+# here, so a whole book is cut into slices rendered by that many processes at
+# once, and measured by that many.  Measured on one 16-core host: one call over
+# a 609-page book took 5.6 min and its measurement about 1 min on one core.
+# Each pdftoppm holds one page's pixels (a 300-dpi render of a large page is
+# about 150-250 MB): lower --jobs on a small machine.
+DEFAULT_JOBS = os.cpu_count() or 1
 
 # A page whose TEXT ink falls below this fraction is a BLANK CANDIDATE for
 # visual review.  It is never treated as a verified blank, so this errs toward
@@ -163,38 +179,70 @@ def contiguous_runs(numbers: list[int]) -> list[tuple[int, int]]:
     return runs
 
 
-def render_pages(
-    pdf_path: Path, renders_dir: Path, dpi: int, first: int, last: int
-) -> None:
-    """Render with one pdftoppm call, then normalise to fixed 4-digit names.
+def render_slices(runs: list[tuple[int, int]], jobs: int) -> list[tuple[int, int]]:
+    """Cut the page runs into slices of about (pages / jobs) pages, one pdftoppm call each.
 
-    pdftoppm pads to the width of the last page number, so a 344-page book gets
-    3 digits and a 1200-page book gets 4.  Downstream runners expect exactly
-    page-NNNN.png, so the names are normalised here rather than everywhere else.
+    Slices stay inside their run and never reorder pages; with one job every
+    run is one slice, which is one call per run, as before.
+    """
+    total = sum(last - first + 1 for first, last in runs)
+    size = max(1, math.ceil(total / max(1, jobs)))
+    slices: list[tuple[int, int]] = []
+    for first, last in runs:
+        start = first
+        while start <= last:
+            end = min(last, start + size - 1)
+            slices.append((start, end))
+            start = end + 1
+    return slices
+
+
+def render_runs(
+    pdf_path: Path, renders_dir: Path, dpi: int, runs: list[tuple[int, int]], jobs: int = 1
+) -> int:
+    """Render the page runs with up to JOBS pdftoppm processes at once, then normalise
+    the names to fixed 4-digit page-NNNN.png.  Returns the number of pdftoppm calls.
+
+    A page's PNG does not depend on which other pages the call renders: measured
+    with poppler 24.02 on two books (42 pages, including a range in the middle
+    of a 344-page book), the bytes of a page rendered alone, in a slice and in a
+    whole-book call are identical, and identical to the renders sealed earlier
+    (tests/check_ocr_engines.py keeps the check, on a made-up PDF).  So slicing
+    changes no renderSha256, and every seal downstream stays valid.
+
+    pdftoppm pads its page numbers to the width of the document's last page, so
+    a 344-page book gets 3 digits and a 1200-page book 4.  Downstream runners
+    expect exactly page-NNNN.png, so the names are normalised here rather than
+    everywhere else.  Each slice renders into its own staging folder, so
+    slices never see each other's files.
     """
     renders_dir.mkdir(parents=True, exist_ok=True)
+    pdftoppm = require_tool("pdftoppm")
+    slices = render_slices(runs, jobs)
     with tempfile.TemporaryDirectory(dir=str(renders_dir)) as staging:
-        prefix = Path(staging) / "page"
-        result = subprocess.run(
-            [
-                require_tool("pdftoppm"),
-                "-r",
-                str(dpi),
-                "-png",
-                "-f",
-                str(first),
-                "-l",
-                str(last),
-                str(pdf_path),
-                str(prefix),
-            ],
-            text=True,
-            capture_output=True,
-            check=False,
-        )
-        if result.returncode != 0:
-            raise SurveyError(f"pdftoppm failed: {(result.stderr or '').strip()}")
-        produced = sorted(Path(staging).glob("page-*.png"))
+
+        def render(numbered: tuple[int, tuple[int, int]]) -> Path:
+            index, (first, last) = numbered
+            slice_dir = Path(staging) / f"slice-{index:04d}"
+            slice_dir.mkdir()
+            result = subprocess.run(
+                [pdftoppm, "-r", str(dpi), "-png", "-f", str(first), "-l", str(last),
+                 str(pdf_path), str(slice_dir / "page")],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            if result.returncode != 0:
+                raise SurveyError(
+                    f"pdftoppm failed on pages {first}-{last}: {(result.stderr or '').strip()}"
+                )
+            return slice_dir
+
+        with concurrent.futures.ThreadPoolExecutor(
+            max_workers=max(1, min(jobs, len(slices)))
+        ) as pool:
+            slice_dirs = list(pool.map(render, enumerate(slices)))
+        produced = sorted(item for folder in slice_dirs for item in folder.glob("page-*.png"))
         if not produced:
             raise SurveyError("pdftoppm produced no output")
         pattern = re.compile(r"page-(\d+)\.png\Z")
@@ -204,6 +252,14 @@ def render_pages(
                 raise SurveyError(f"unexpected render name: {item.name}")
             number = int(match.group(1))
             os.replace(item, renders_dir / f"page-{number:04d}.png")
+    return len(slices)
+
+
+def render_pages(
+    pdf_path: Path, renders_dir: Path, dpi: int, first: int, last: int, jobs: int = 1
+) -> None:
+    """Render one page range (render_runs on a single run)."""
+    render_runs(pdf_path, renders_dir, dpi, [(first, last)], jobs)
 
 
 RULE_COVERAGE = 0.5   # a row/column this inked is a printed rule, not text
@@ -262,6 +318,50 @@ def measure_page(render_file: Path) -> tuple[int, int, float | None]:
     return width, height, text_ink / area
 
 
+def page_facts(renders_dir: Path, scan_page: int) -> PageFacts:
+    """The render's size, text-ink fraction and SHA-256: a function of its bytes alone."""
+    render_file = renders_dir / f"page-{scan_page:04d}.png"
+    if not render_file.is_file():
+        raise SurveyError(f"render missing after rendering: {render_file}")
+    width, height, ink = measure_page(render_file)
+    return PageFacts(
+        scan_page=scan_page,
+        render_file=render_file,
+        render_sha256=sha256_file(render_file),
+        width=width,
+        height=height,
+        ink_fraction=ink,
+    )
+
+
+def measure_pages(
+    renders_dir: Path, selected: list[int], jobs: int, last_page: int
+) -> list[PageFacts]:
+    """Measure and hash every selected page, JOBS processes at a time, in page order.
+
+    Each page's facts come from its file's bytes alone (page_facts), so the
+    manifest is the same however many processes measure, and the same as when
+    one did.
+    """
+    pages: list[PageFacts] = []
+
+    def note(facts: PageFacts) -> None:
+        pages.append(facts)
+        if facts.scan_page % 50 == 0:
+            print(f"  measured   : {facts.scan_page}/{last_page}", flush=True)
+
+    if jobs <= 1 or len(selected) < 2:
+        for scan_page in selected:
+            note(page_facts(renders_dir, scan_page))
+        return pages
+    with concurrent.futures.ProcessPoolExecutor(
+        max_workers=min(jobs, len(selected))
+    ) as pool:
+        for facts in pool.map(functools.partial(page_facts, renders_dir), selected, chunksize=4):
+            note(facts)
+    return pages
+
+
 def build_manifest(
     pdf_path: Path, pdf_sha: str, pages: list[PageFacts], manifest_path: Path
 ) -> dict[str, Any]:
@@ -307,6 +407,14 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="re-render pages that already exist",
     )
+    parser.add_argument(
+        "--jobs",
+        type=int,
+        default=DEFAULT_JOBS,
+        help="pdftoppm processes rendering at once, and processes measuring at once "
+             f"(default: the machine's CPUs, here {DEFAULT_JOBS}); the renders are the "
+             "same bytes whatever the number",
+    )
     return parser
 
 
@@ -318,6 +426,8 @@ def main(argv: list[str] | None = None) -> int:
             raise SurveyError(f"source PDF does not exist: {pdf_path}")
         if arguments.dpi < 72:
             raise SurveyError("--dpi below 72 is too low for small CJK glyphs")
+        if arguments.jobs < 1:
+            raise SurveyError("--jobs must be at least 1")
         output_directory = arguments.output_directory.expanduser().resolve()
         renders_dir = output_directory / RENDERS_DIRNAME
         output_directory.mkdir(parents=True, exist_ok=True)
@@ -359,32 +469,15 @@ def main(argv: list[str] | None = None) -> int:
             shown = ", ".join(f"{a}" if a == b else f"{a}-{b}" for a, b in runs[:6])
             if len(runs) > 6:
                 shown += f", … {len(runs) - 6} more runs"
-            print(f"  rendering  : {len(todo)} page(s) [{shown}] at {arguments.dpi} dpi",
+            print(f"  rendering  : {len(todo)} page(s) [{shown}] at {arguments.dpi} dpi, "
+                  f"{arguments.jobs} pdftoppm process(es) at a time",
                   flush=True)
-            for first, last in runs:
-                render_pages(pdf_path, renders_dir, arguments.dpi, first, last)
+            render_runs(pdf_path, renders_dir, arguments.dpi, runs, arguments.jobs)
         else:
             print(f"  rendering  : all {len(wanted)} selected page(s) already present",
                   flush=True)
 
-        pages: list[PageFacts] = []
-        for scan_page in selected:
-            render_file = renders_dir / f"page-{scan_page:04d}.png"
-            if not render_file.is_file():
-                raise SurveyError(f"render missing after rendering: {render_file}")
-            width, height, ink = measure_page(render_file)
-            pages.append(
-                PageFacts(
-                    scan_page=scan_page,
-                    render_file=render_file,
-                    render_sha256=sha256_file(render_file),
-                    width=width,
-                    height=height,
-                    ink_fraction=ink,
-                )
-            )
-            if scan_page % 50 == 0:
-                print(f"  measured   : {scan_page}/{last_page}", flush=True)
+        pages = measure_pages(renders_dir, selected, arguments.jobs, last_page)
     except SurveyError as error:
         print(f"ERROR {error}", file=sys.stderr)
         return 2

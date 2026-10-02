@@ -563,13 +563,26 @@ def finish_progress(output: Path) -> str:
     return said
 
 
+def beside_pdf(output: Path) -> str:
+    """The copies finish_book.py wrote beside the book's PDF (its report's
+    delivered list, scripts/_deliver.py), for the DONE line: the files the
+    person reads."""
+    try:
+        report = json.loads((finish_log(output).parent / "finish-report.json").read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, ValueError):
+        return ""
+    written = [entry.get("path") for entry in report.get("delivered") or []
+               if isinstance(entry, dict) and entry.get("written") and entry.get("path")]
+    return f"; beside the PDF: {', '.join(written)}" if written else ""
+
+
 def finish_ending(output: Path, match: re.Match, warned: str) -> tuple[int, str]:
     """The wait's line for finish_book.py's RESULT line MATCH."""
     code = int(match.group(1))
     said = re.sub(r"^(?:DONE|FAILED|STOPPED|NOT READY) finish_book\.py: ", "", match.group(2).strip())
     if code == 0:
         return EXIT_DONE, (f"DONE finish_book.py: {clip(said, 300)}; final text {output / 'final.md'}, doubt list "
-                           f"{output / 'doubts.md'}{warned}")
+                           f"{output / 'doubts.md'}{beside_pdf(output)}{warned}")
     if code in FINISH_AGAIN:
         return EXIT_STOPPED, f"STOPPED finish_book.py: exit {code}: {clip(said, 300)}{warned}"
     if code == 3:

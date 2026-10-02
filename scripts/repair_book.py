@@ -20,7 +20,10 @@ The run, in order:
 3. the defect counters (_book_lint.py) are taken on the sealed text;
 4. the repair stages run in order, each switchable: furniture, marks,
    headings (per page), the model's questions (--no-model), contents,
-   title page, heading levels, paragraphs and joins (book level).  Every change is an offset
+   title page, heading levels, paragraphs and joins (book level), and the
+   text runs (digits, Latin letters, kana) both engines read that the page
+   lacks, with the marks of a refused first answer that engine A confirms
+   (_repair_runs.py).  Every change is an offset
    edit logged in repair-log.jsonl with its page, the text before and after,
    the rule or question, and the evidence; two edits over the same text are
    a `conflict` doubt.  The questions stage asks the model the questions
@@ -47,7 +50,7 @@ Usage:
         [--endpoint URL] [--model NAME] [--reasoning-effort xhigh] [--max-tokens 16000]
         [--max-inflight 8] [--timeout SECONDS]
         [--no-furniture] [--no-marks] [--no-headings] [--no-contents]
-        [--no-title-page] [--no-levels] [--no-paragraphs] [--no-joins]
+        [--no-title-page] [--no-levels] [--no-paragraphs] [--no-joins] [--no-runs]
 
 Exit codes: 0 done; 2 inputs failed verification (or changed during the
 run, or the output lies in an input folder); 3 the output folder exists;
@@ -80,6 +83,7 @@ import _repair_model as rm  # noqa: E402
 import _repair_joins as rj  # noqa: E402
 import _repair_questions as rq  # noqa: E402
 import _repair_rules as rr  # noqa: E402
+import _repair_runs as rn  # noqa: E402
 import _repair_structure as rs  # noqa: E402
 from _ocr_markdown import parse_page_spec  # noqa: E402
 
@@ -206,6 +210,17 @@ def joins_stage(context: Context) -> StageResult:
     return StageResult(plan.edits, plan.questions, plan.doubts)
 
 
+def runs_stage(context: Context) -> StageResult:
+    """Text runs both engines read that the page lacks, the marks of a
+    refused first answer engine A confirms, and the contents numbers S11
+    moved against both engines (_repair_runs N4, R1, N1, N3, N2); last, so
+    that no question sees a different text and every held answer is reused.
+    N4 and R1 are applied before the rest is proposed."""
+    plan = rn.runs(context.book, context.model, context.ledger, context.order(), context.apply, context.facts(),
+                   context.boundaries)
+    return StageResult(plan.edits, [], plan.doubts)
+
+
 def questions_stage(context: Context) -> StageResult:
     """The model's questions (_repair_questions): run() asks the questions
     the stages before it planned at this place in the order, and each later
@@ -222,8 +237,9 @@ class Stage:
 
 # The stages in the order they run (the design's: per page furniture, marks
 # and heading content; the model's questions; then the book-level contents,
-# title page, paragraphs and joins).  `run` is None for a stage not in this
-# build: it is reported "not built" and changes nothing.
+# title page, paragraphs and joins; last the text runs, which no question
+# may see).  `run` is None for a stage not in this build: it is reported
+# "not built" and changes nothing.
 STAGES: tuple[Stage, ...] = (
     Stage("furniture", "--no-furniture", furniture_stage),
     Stage("marks", "--no-marks", marks_stage),
@@ -234,6 +250,7 @@ STAGES: tuple[Stage, ...] = (
     Stage("levels", "--no-levels", levels_stage),
     Stage("paragraphs", "--no-paragraphs", paragraphs_stage),
     Stage("joins", "--no-joins", joins_stage),
+    Stage("runs", "--no-runs", runs_stage),
 )
 # The rules each built stage runs in this build (the report names them; a
 # stage's other rules are not built yet).
@@ -247,6 +264,7 @@ STAGE_RULES = {
     "levels": ["S5", "S12"],
     "paragraphs": ["P4", "P7", "P1", "P2", "P6", "P5"],
     "joins": ["S", "T", "H", "L", "P-3", "J1", "J2", "J3", "J4", "P-1", "P-2", "P6"],
+    "runs": ["N4", "R1", "N1", "N3", "N2"],
 }
 
 
@@ -452,6 +470,15 @@ def run(arguments: argparse.Namespace, client: Any | None = None) -> int:
         book = ri.load_book(paths, pages)
     except ri.InputError as error:
         print(f"inputs failed verification:\n{error}", file=sys.stderr)
+        return EXIT_INPUTS
+    try:
+        import numpy  # noqa: F401
+        import PIL  # noqa: F401
+    except ImportError as error:
+        # Without them no page is measured and no crop is cut: the rules that
+        # read the print's geometry would be off with nothing said.
+        print(f"repair_book needs numpy and Pillow in the interpreter that runs it ({error}); "
+              f"run it with the skill's Python", file=sys.stderr)
         return EXIT_INPUTS
     files = ri.input_files(book)
     hashes_before = ri.hash_inputs(files)

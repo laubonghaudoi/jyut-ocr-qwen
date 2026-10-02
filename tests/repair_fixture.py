@@ -319,7 +319,9 @@ def write_book(root: Path, spec: Mapping[int, Mapping[str, Any]], *, assemble: b
         (root / "ocr-hunyuan" / f"{stem}.txt").write_text(engine_b(page), encoding="utf-8")
         markdown = sealed_text(page)
         record = {"scanPage": scan, "status": "complete", "schemaVersion": 1, "mode": "merge",
-                  "adjudications": list(page.get("adjudications") or []), "doubts": []}
+                  "adjudications": list(page.get("adjudications") or []), "doubts": [],
+                  **({"punctuationPasses": list(page["punctuationPasses"])} if page.get("punctuationPasses") else {}),
+                  **({"tableStitch": dict(page["tableStitch"])} if page.get("tableStitch") else {})}
         data = seal(markdown, record)
         (root / "proofread" / f"{stem}.md").write_text(markdown, encoding="utf-8")
         (root / "proofread" / f"{stem}.json").write_bytes(data)

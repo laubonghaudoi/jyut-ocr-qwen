@@ -237,10 +237,13 @@ def resumed_ok(book: Path, asked: int) -> bool:
     return 0 < asked < 10 and reused > 0 and data["model"]["asked"] == asked and asked + reused == 10
 
 
-def finish(book: Path, *argv: str, client: Any = None) -> tuple[int, list[str]]:
+def finish(book: Path, *argv: str, client: Any = None, deliver: bool = False) -> tuple[int, list[str]]:
+    """finish_book.main on BOOK; without DELIVER, --no-deliver (the fixture's
+    manifest names a PDF that does not exist: its copies are delivery_checks')."""
     out = io.StringIO()
     with contextlib.redirect_stdout(out):
-        code = finish_book.main([str(book), "--workers", "1", *argv], client=client)
+        code = finish_book.main([str(book), "--workers", "1", *argv, *(() if deliver else ("--no-deliver",))],
+                                client=client)
     return code, out.getvalue().splitlines()
 
 
@@ -652,6 +655,45 @@ def process_checks(tmp: Path) -> None:
           f"a book not ready: the wait says FAILED ({code}: {line})")
 
 
+def delivery_checks(tmp: Path) -> None:
+    """final.md and doubts.md copied beside the PDF the page manifest names, as
+    X.md and X-doubts.md (scripts/_deliver.py), the doubt list's final.md
+    reading X.md; the lines name them; a PDF that has moved is a WARNING, never
+    a failure, and the book's own files stand."""
+    book = phase3_book(tmp / "delivery" / "work")
+    shelf = tmp / "delivery" / "shelf"
+    shelf.mkdir()
+    pdf = shelf / "海港 年報.pdf"
+    pdf.write_bytes(b"%PDF-1.4 made up\n")
+    manifest = json.loads((book / "page-manifest.json").read_text(encoding="utf-8"))
+    manifest.update(source_pdf=str(pdf), source_sha256=pp.sha256_file(pdf))
+    (book / "page-manifest.json").write_text(json.dumps(manifest, indent=1), encoding="utf-8")
+    code, lines = finish(book, "--no-model", deliver=True)
+    final, doubts = shelf / "海港 年報.md", shelf / "海港 年報-doubts.md"
+    check(code == 0 and final.is_file() and final.read_bytes() == (book / "final.md").read_bytes(),
+          f"final.md copied beside the PDF as X.md ({code}, {sorted(p.name for p in shelf.iterdir())})")
+    own = (book / "doubts.md").read_text(encoding="utf-8")
+    check(doubts.is_file() and doubts.read_text(encoding="utf-8") == own.replace("final.md", final.name)
+          and "final.md" in own and "final.md" not in doubts.read_text(encoding="utf-8"),
+          "doubts.md copied as X-doubts.md, its final.md reading X.md")
+    check(lines[3:] == [f"final.md beside the PDF: {final}", f"doubts.md beside the PDF: {doubts}"]
+          and "WARNING" not in lines[0], f"the lines name the copies, no WARNING ({lines})")
+    check(sorted(p.name for p in shelf.iterdir()) == sorted([pdf.name, final.name, doubts.name]),
+          "nothing else beside the PDF")
+    import wait_for_run
+    check(wait_for_run.beside_pdf(book) == f"; beside the PDF: {final}, {doubts}",
+          f"the wait's DONE line names the copies ({wait_for_run.beside_pdf(book)!r})")
+    code, lines = finish(book, "--no-model", deliver=True)
+    check(code == 0 and "WARNING" not in lines[0] and not list(shelf.glob("*.edited-*")),
+          f"run again: its own copies replaced, nothing kept aside ({lines[:1]})")
+    pdf.rename(shelf / "renamed.pdf")
+    code, lines = finish(book, "--no-model", deliver=True)
+    log = (book / "finish" / finish_book.LOG_NAME).read_text(encoding="utf-8")
+    check(code == 0 and "2 WARNING line(s)" in lines[0] and len(lines) == 3
+          and "final.md not copied beside the PDF: the PDF is no longer at" in log,
+          f"the PDF moved: DONE with a WARNING per copy, the book's own files stand ({lines[:1]})")
+
+
 def main() -> int:
     with tempfile.TemporaryDirectory(prefix="finish-book-") as name:
         tmp = Path(name)
@@ -663,6 +705,7 @@ def main() -> int:
         layout_checks(tmp)
         process_checks(tmp)
         warning_checks(tmp)
+        delivery_checks(tmp)
     print(f"{'FAIL' if FAILURES else 'ok  '} finish_book.py: {len(FAILURES)} problem(s)")
     return 1 if FAILURES else 0
 

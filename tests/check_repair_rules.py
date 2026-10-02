@@ -516,6 +516,11 @@ def marks_spec() -> dict[int, dict[str, Any]]:
     edit_column(spec, 12, 8, "上", "丁", "丁")
     # A printed ）（ engine A read, before a bracketed figure.
     edit_column(spec, 12, 3, "）（5）", "）（5）")
+    # The page holds the figure and engine B's stand-in before it; and a
+    # note marker before a stray bracket and the figure, which engine A
+    # wrote in a LaTeX wrapper.
+    edit_column(spec, 12, 20, "（6）", "丁（6）", "一丁一")
+    edit_column(spec, 12, 28, "$ ^{㉑} $（7）", "㉑）（7）")
     # K8, K9, K10, K12, K13.
     edit_column(spec, 19, 16, "（二）", "（二、）", "八二一")
     k, text = column(spec[17])
@@ -609,6 +614,11 @@ def marks_checks(tmp: Path) -> None:
           f"K7b: engine A's closing quote where the page opens none is a question, not an edit "
           f"(asked {result.asked(8)})")
     check("K1" in result.rules(10), f"K1: （3） follows （2） ({result.rules(10)})")
+    k, text = column(spec[12])
+    check(text[16:20] + "（6）" in pages[12] and "丁（6）" not in pages[12],
+          f"K1: the stand-in before a figure the page already holds goes ({result.rules(12)})")
+    check(text[24:28] + "㉑（7）" in pages[12] and "$" not in pages[12],
+          "K1: a stray bracket after the page's note marker goes; engine A's wrapper and its marks are not written again")
     check("K1" in result.rules(11) and "（4）" in pages[11] and "四）（" not in pages[11],
           f"K1: （4） over the numeral engine B read for it, on a book where engine B writes numerals for "
           f"figures ({result.rules(11)})")
@@ -675,7 +685,10 @@ def marks_checks(tmp: Path) -> None:
     ledger = re_.Ledger({scan: book.pages[scan].sealed_text for scan in order})
     first: list[re_.Edit] = []
     plan = rr.marks(book, bare, ledger.texts, order, lambda edits: first.extend(edits), rr.book_facts(book, bare))
-    rules = sorted({e.rule for e in first + plan.edits} - {"K8", "K9", "K10", "K12", "K13"})
+    # An edit of K1 that names no stand-in (a stray bracket beside a figure
+    # the page holds) acts on none.
+    rules = sorted({e.rule for e in first + plan.edits if e.evidence.get("standIns") != ""}
+                   - {"K8", "K9", "K10", "K12", "K13"})
     check(not rules, f"with no stand-ins learned (nor numerals read for figures) no rule that acts on a stand-in "
                      f"(K1-K7) fires ({rules})")
 

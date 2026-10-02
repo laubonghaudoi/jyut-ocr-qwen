@@ -24,13 +24,13 @@
 單 GPU 主機上，本機 LLM server 同 OCR 模型唔可以同時常駐，所以長書分三個階段。**階段之間靠磁碟檔交接，唔靠對話 context**——長書一定超出任何 context window，而 agent harness 會 auto-compact，靠對話記住 survey 結果一定會蝕：
 
 ```
-Phase 1  LLM server 開住，GPU 基本閒置          ~0.8 秒／頁（CPU）
+Phase 1  LLM server 開住，GPU 基本閒置          ~0.8 秒／頁（單核 CPU；`--jobs` 預設用晒所有 core，bytes 一樣）
    survey_pdf.py  →  renders/page-NNNN.png
                   →  page-manifest.json    ← 交接物（已封 hash）
                   →  survey-report.json    ← 交接物（candidates，未核實）
 
-Phase 2  LLM server 停低，每個前景 tool call 做一段，預算用完 exit 75 再叫    ~3 秒／頁（GPU）
-   run_ocr_phase.py -- run_paddleocr_vl.py …，之後再叫一次 -- run_hunyuanocr.py …
+Phase 2  LLM server 停低，每個前景 tool call 做一段，預算用完 exit 75 再叫    B ~3 秒／頁、A ~7 秒／頁（GPU）
+   run_ocr_phase.py -- run_hunyuanocr.py …（做完即刻 build_draft.py → BOOK/draft.md），之後再叫 -- run_paddleocr_vl.py …
                   →  ocr-paddle/page-NNNN.{json,txt}、ocr-hunyuan/page-NNNN.{json,txt}   ← 交接物（逐頁封 hash）
                   →  <engine>-run.json           ← runner 自己寫嘅 run report，預設落喺 OUTPUT_DIR 上一層；
                                                     想放入 reports/ 就要顯式畀 runner 加
@@ -503,13 +503,15 @@ PaddleOCR-VL 專有注意事項：
   ```bash
   . ~/.config/jyut-ocr/env.sh   # 本機嘅 release／restore／health／預算（OCR_PHASE_*）；每部機唔同，唔好照抄其他機嘅值
 
-  # 每個前景 tool call 淨係一個交接；timeout 設到 harness 最大值
-  python3 scripts/run_ocr_phase.py -- \
-    python3 scripts/run_paddleocr_vl.py RENDER_DIR OCR_A_DIR > ocr-a-phase.log 2>&1; echo "exit=$?"; tail -20 ocr-a-phase.log
-  # exit 75：預算用完、server 已開返、封存咗嘅頁照留——照樣再叫同一個 command；exit 0：做完；exit 1：睇 ERROR，唔好淨係再叫
-
+  # 每個前景 tool call 淨係一個交接；timeout 設到 harness 最大值（shell 冇時限嘅機就唔設，見 SKILL.md〈安全並行〉）
+  # 引擎 B 先：草稿淨係用佢嘅字，佢做完就即刻出草稿，唔使等引擎 A
   python3 scripts/run_ocr_phase.py -- \
     python3 scripts/run_hunyuanocr.py RENDER_DIR OCR_B_DIR > ocr-b-phase.log 2>&1; echo "exit=$?"; tail -20 ocr-b-phase.log
+  # exit 75：預算用完、server 已開返、封存咗嘅頁照留——照樣再叫同一個 command；exit 0：做完；exit 1：睇 ERROR，唔好淨係再叫
+  python3 scripts/build_draft.py BOOK        # 引擎 B exit 0 之後即刻跑：BOOK/draft.md 同 PDF 隔籬嗰份
+
+  python3 scripts/run_ocr_phase.py -- \
+    python3 scripts/run_paddleocr_vl.py RENDER_DIR OCR_A_DIR > ocr-a-phase.log 2>&1; echo "exit=$?"; tail -20 ocr-a-phase.log
   ```
 
   **一定要喺前景行**，唔准放背景：server 停咗期間 agent 冇模型用。成本書做唔晒一個 call，就重複叫同一個 command 直到 exit 0；每次 call 都會重新載入 OCR 模型同 LLM server，所以預算設得近 harness 時限好過設得細。唔好 pipe 去 `tail`／`head`（會食咗 exit code），唔好喺同一個 call 串兩個交接。規則全文見 SKILL.md〈安全並行〉。顯存夠就唔會 swap。
@@ -703,11 +705,11 @@ Annotated 命令故意唔帶 notation policy：即使來源符號已核圖，佢
 
 **每個改動都有紀錄。** 每個改動係一條 offset edit，寫入 `repair-log.jsonl`：邊頁、邊行、offset、改前、改後、邊條規則或者邊條問題、證據；由問題嚟嘅改動仲有答案、裁圖同裁圖 hash。同一段字有兩個改動，先提出嗰個生效，另一個記 `conflict`。寫完之後用封存頁由頭重播成條 log，要 byte for byte 等於寫出嚟嘅 `pages/page-NNNN.md` 同 `combined-repaired.md`，唔等就 exit 5。
 
-**階段同開關。** 按次序行，每個都可以關：`--no-furniture`（書眉、卷次、頁碼、書眉位嘅裁決答案）、`--no-marks`（標點同 engine B 代字）、`--no-headings`（標題內容）、問 Qwen（`questions`：前面三個階段嘅問題喺呢度一次過問；之後每個階段嘅問題，嗰個階段行完即刻問，下一個階段就喺答咗嘅文本上做；`--no-model` 就唔問，全部問題記 `look-not-asked`；加埋 `--resume`，之前嗰次答咗嘅照用、照樣寫入，淨係冇答案嘅問題（連第二輪、抄字嘅逐格問題）記 `look-not-asked`，報告 `model.unasked` 寫明要問幾多條、幾多次呼叫，咁就知道再跑要用幾多 GPU）、`--no-contents`（目錄同篇目）、`--no-title-page`（題名頁）、`--no-levels`（標題級數）、`--no-paragraphs`（頁內分段）、`--no-joins`（分頁 boundary）。未入呢個版本嘅階段，報告寫「not built」，乜都唔改。
+**階段同開關。** 按次序行，每個都可以關：`--no-furniture`（書眉、卷次、頁碼、書眉位嘅裁決答案）、`--no-marks`（標點同 engine B 代字）、`--no-headings`（標題內容）、問 Qwen（`questions`：前面三個階段嘅問題喺呢度一次過問；之後每個階段嘅問題，嗰個階段行完即刻問，下一個階段就喺答咗嘅文本上做；`--no-model` 就唔問，全部問題記 `look-not-asked`；加埋 `--resume`，之前嗰次答咗嘅照用、照樣寫入，淨係冇答案嘅問題（連第二輪、抄字嘅逐格問題）記 `look-not-asked`，報告 `model.unasked` 寫明要問幾多條、幾多次呼叫，咁就知道再跑要用幾多 GPU）、`--no-contents`（目錄同篇目）、`--no-title-page`（題名頁）、`--no-levels`（標題級數）、`--no-paragraphs`（頁內分段）、`--no-joins`（分頁 boundary）、`--no-runs`（數字同拉丁字：兩個引擎都讀到、頁面冇嘅數字、拉丁字、假名；重試過嘅標點段；目錄頁碼）。未入呢個版本嘅階段，報告寫「not built」，乜都唔改。
 
-**機械規則（呢個版本有 `furniture`、`marks`、`headings`、`contents`、`title-page`、`levels`、`paragraphs` 同 `joins`）。** 每條規則淨係喺本書量到佢要嘅嘢（gate 過咗）先出手；搵到個位但證據唔夠、或者兩個來源唔啱，就寫一條問題（`questions.json`，問題階段問 Qwen；`--no-model` 就記 `look-not-asked`），唔會估。報告嘅 `stages` 寫明每個階段行咗邊啲規則。
+**機械規則（呢個版本有 `furniture`、`marks`、`headings`、`contents`、`title-page`、`levels`、`paragraphs`、`joins` 同 `runs`）。** 每條規則淨係喺本書量到佢要嘅嘢（gate 過咗）先出手；搵到個位但證據唔夠、或者兩個來源唔啱，就寫一條問題（`questions.json`，問題階段問 Qwen；`--no-model` 就記 `look-not-asked`），唔會估。報告嘅 `stages` 寫明每個階段行咗邊啲規則。
 
-刪得嘅嘢得三類：書眉帶嘅嘢（書眉、後綴、頁碼，同埋兩個引擎喺嗰度都冇讀到正文字嘅裁決答案）；engine A 冇讀到、而係 engine B 代字（M-7）嘅字；一個引擎讀一次、頁面寫咗兩次嘅字。寫得嘅嘢：engine A 喺嗰個位讀到嘅（數字、破折號、點、引號、括號）、直排括號嘅普通寫法、頁面已有嘅字搬位（由右至左印嘅頁翻返正、日期搬去標題下面）、同 Markdown 結構（`#`、空行、編號後面嘅空格）。
+刪得嘅嘢得四類：書眉帶嘅嘢（書眉、後綴、頁碼，同埋兩個引擎喺嗰度都冇讀到正文字嘅裁決答案）；engine A 冇讀到、而係 engine B 代字（M-7）嘅字；一個引擎讀一次、頁面寫咗兩次嘅字；`runs` 階段將一段數字或者整行西文寫返嗰陣，頁面留低、本身屬於嗰段嘅符號（嗰段數字自己有嘅連字號、冒號、逗號、點；嗰啲西文行自己嘅括號）。寫得嘅嘢：engine A 喺嗰個位讀到嘅（數字、破折號、點、引號、括號）、兩個引擎喺同兩個字之間都讀到、頁面冇嘅數字、拉丁字同假名（`runs`：照 engine A 嘅寫法；頁面已有嘅標點原樣留低，貼住數字段、頁面冇而兩個引擎都有嘅標點照 engine A 寫）、重試過嘅標點段入面第一次答案同 engine A 一樣嘅標點（寫 engine A 嘅字形）、直排括號嘅普通寫法、頁面已有嘅字搬位（由右至左印嘅頁翻返正、日期搬去標題下面）、同 Markdown 結構（`#`、空行、編號後面嘅空格）。
 
 書眉（`furniture`）：
 
@@ -721,7 +723,7 @@ Annotated 命令故意唔帶 notation policy：即使來源符號已核圖，佢
 
 標點同代字（`marks`），淨係喺頁面同 engine A 共有、而喺 engine A 入面相連嘅兩個字之間，對 engine A 冇讀到嘅字出手：
 
-- K1 engine A 讀到括號數字（d）：頁面喺嗰度有最多四個代字（M-7，或者漢字數目字，或者 engine B 喺括號字形中間讀嘅字），或者一對 `）（`／`（）`，就寫 `（d）`，頁面喺數字前面嘅標點保留（開括號除外），補返 engine A 有而頁面冇嘅標點。唔係代字、或者代嘅唔係 engine A 喺嗰度讀到嘅嘢（數字，或者嗰度嘅標點、破折號、點）嘅字，就問。
+- K1 engine A 讀到括號數字（d）：頁面喺嗰度有最多四個代字（M-7，或者漢字數目字，或者 engine B 喺括號字形中間讀嘅字），或者一對 `）（`／`（）`，就寫 `（d）`，頁面喺數字前面嘅標點保留（開括號除外），補返 engine A 有而頁面冇嘅標點（頁面嗰度已經有嗰啲標點、後面跟住頁面自己嘅註號，就唔再補）。頁面已經有嗰個數字、前面多咗代字或者一個冇對嘅括號，就淨係刪走多出嚟嗰個。engine A 嘅 LaTeX 包裝同註號唔會抄入頁面；數字喺 engine A 嘅上標入面（註號）、或者隔籬有字母（任何文字），就唔寫。唔係代字、或者代嘅唔係 engine A 喺嗰度讀到嘅嘢（數字，或者嗰度嘅標點、破折號、點）嘅字，就問。
 - K1、K2 當漢字數目字係 engine B 讀 engine A 數字嘅另一種寫法，淨係喺本書量到 engine B 真係會將 engine A 嘅數字讀成漢字數目字（M-7b 嘅 `numeralsAtFigures`）先算；量唔到，印嘅係邊種寫法要睇圖，漢字數目字唔當代字。
 - K2 engine A 一行開頭係數字：頁面嗰行（標題、清單項、段落）開頭係一至三個代字或者漢字數目字（或者淨係一個散標點），就寫數字：engine A 有點就 `d.`，engine B 讀咗括號字形就 `（d）`，數字後面直接接題目就加一個空格。
 - K3 engine A 讀到破折號、冇字，頁面有一兩個代字、engine B 喺嗰度都冇讀到代字以外嘅字、頁面其他標點都係 engine A 有嘅，就寫 `——`（engine A 得一格就 `—`）；engine A 自己喺隔籬讀咗同一個字形，或者任何一樣唔啱，就問。
@@ -777,6 +779,15 @@ Annotated 命令故意唔帶 notation policy：即使來源符號已核圖，佢
 
 `join` 永遠唔會寫入標題、清單項、表格或者 HTML 區塊（finalize contract）。上一頁以清單項收尾、下一頁第一段接住佢（`join`），而清單下一項喺空行之後：刪嗰行空行（P6）。輸出 `boundaries.json`（每個 marker 一個 label）同 `boundary-evidence.json`（每個 label 嘅規則、量度、有冇定案）；寫完用 finalize 嘅 contract 檢查，過唔到就 exit 4。報告 `boundaries` 寫每種 label、每條規則幾多、幾多未定案。之後照上面 finalize：`python3 scripts/finalize_page_markers.py repaired/combined-repaired.md --boundary-manifest repaired/boundaries.json --output final.md --write`，再做 `--mode final` audit（`finish_book.py` 做晒呢兩步，見下面〈一個 command 做完〉）。
 
+數字、拉丁字同假名（`runs`，`_repair_runs.py`；最後一個階段，問完模型之後先行，所以問題同裁圖一個都唔會變，之前答過嘅答案照用）：第三階段合併淨係用漢字（`CJK`），所以年份、頁碼範圍、卷數、西文人名、假名書名，兩個引擎都讀到嘅，淨係喺標點模型對住裁圖自己寫咗先會留喺頁面。單位係頁面相連兩個漢字之間嘅位（gap）；證據係兩個引擎喺佢哋各自相連嘅同兩個字之間讀到嘅嘢。比較用 token（一個 gap 嘅文字唔當係行頭，除非係頁頭：行中間嘅 ` - ` 係標點，行頭嘅 `- `、`#`、成行 `---` 先係結構）：數字、字母、假名嘅一段（連住嘅連字號、斜線、小數點、千位逗號、字母之後嘅點或者逗號、西文字之間嘅空格都算一段）、標點（按類：闊窄、直排寫法、單雙書名號、方圓括號當一類）、表格嘅格線；換行、空格、引擎嘅 markup（LaTeX、HTML tag、grounding box、`*`）唔計。兩個引擎「一樣」：token 一樣，或者拼埋之後嘅字一樣（一個引擎用 `*` 包住書名，前面個點就會斷開嗰段；兩段數字中間冇標點就唔會拼埋）。寫嘅時候：數字段照 engine A 嘅寫法；頁面已有嘅標點留喺原位、原樣；頁面冇而兩個引擎都有嘅標點，照 engine A 嘅字形寫——ASCII 標點寫全形，但喺西文入面（貼住拉丁字母；括號就要喺幾個西文字嘅句子中間，而且頁面嗰個 gap 自己冇全形圓括號）照 ASCII 寫，西文 token 之間 engine A 有空格就留一個；兩段數字之間留一個空格；漢字同數字之間唔加空格。
+
+- N4 目錄階段（S11）將條目嘅頁碼由上一行行尾搬咗去呢行行頭、刪咗條目開頭嘅括號（連清單符號或者行尾空格一齊刪都計）、或者刪咗標題 block 嘅 `#`。改返嘅條件：engine A（engine B 對得到嗰度就兩個都要）喺上一行行尾、嗰行其他字後面讀到個數，呢行行頭冇——個數喺引擎自己企一行就唔計，嗰個係條目自己嘅編號——而且個數喺上一行行尾有著落（頁面已經有，或者 N1 寫得落）；或者喺行頭讀到個括號；或者 engine A 將嗰個 block 標做標題、又或者 engine B 喺嗰度寫 `#`（evidence 寫明邊個）。頁碼冇著落就唔搬，記 `run-no-place`，個數唔會唔見。標題改返嗰陣，用 `levels` 階段俾同一個封存級數嘅篇題嗰個級數（佢俾嘅唔止一個就照封存級數）；全書頭一批標題（前面冇任何標題：題名頁）照封存級數。同一頁文字一樣嘅幾行，按次序對返寫佢哋嘅 S11 記錄。
+- R1 重試過嘅標點段（封存 JSON 嘅 `punctuationPasses` 有 `firstAnswer`，第一次答案因為數目唔夠被拒）：第一次答案嘅字喺頁面正正出現一次，而嗰段某個 gap 入面，第一次答案同 engine A 寫嘅標點同數字一樣（按類）、頁面唔同（engine B 對得到嘅話都要一樣），就將頁面嗰個 gap 改做 engine A 嘅寫法——字形跟引擎，唔跟第一次答案（量過：對圖，兩者字形唔同嗰陣印嘅係引擎嗰個）；空格同西文標點照上面。唔改、記 `retry-marks-unverified`：engine B 唔同；頁面嗰個 gap 有第一次答案冇嘅數字、有 markup（`*`、tag）、有模型答案寫過；嗰段頭尾兩個 gap，engine A 喺嗰度換行而頁面冇（或者相反）——頁面嗰度仲有隔籬 block 嘅標點；行頭自己一個數。頁面嗰個 gap 有換行、結構、表格線就唔郁。重試寫咗、第一次答案同 engine A 都冇嘅標點留喺度，一段記一條 `retry-marks-unverified`。
+- N1 兩個引擎喺個 gap 讀到一樣嘅嘢、頁面冇數字段。頁面嘅標點逐個對 engine A 嘅標點：先對同一類，engine A 喺嗰個 gap 冇嗰類，先至當開括號一類、閂括號一類。**T1**（engine A 嘅標點頁面全部有）：每段數字入返佢喺標點之間嘅位；engine A 喺數字段隔籬換行，頁面就寫喺換行嗰邊。頁面多出嚟嘅連字號、冒號、逗號、點、斜線、波浪號，要嗰段數字自己有嗰個符號、engine B 亦冇將佢讀做標點，先當係數字段留低嘅，同數字一齊寫返嗰陣刪；其他多出嚟嘅標點，唔寫，記疑點。**T2**（engine A 有頁面冇嘅標點；頁面一個標點都冇都係）：頁面嘅標點留喺原位，兩個頁面標點之間嘅一段，engine A 喺同一行有數字段先寫——數字段連貼住佢嘅標點，照 engine A 次序；淨係得標點嘅一段唔郁；由左對同由右對寫出嚟唔同就唔寫。寫出嚟嘅括號、書名號、引號，成頁改完之後喺嗰行搵唔到另一半就唔寫（數字照寫，evidence 記 `withheld`）。頁面有換行而 engine A 冇（又冇標點定位）、或者數字段喺 engine A 自己企一行，唔寫。兩個引擎數字一樣、標點唔同：淨係頁面標點同其中一個引擎全部一樣、唔使刪頁面任何標點嗰陣寫（T1）。表格跨頁、後一頁嘅行接咗去前一頁（封存 JSON 嘅 `tableStitch`）：用後一頁未搬之前嘅文字對後一頁自己嘅引擎讀，改動寫落而家有嗰啲行嘅頁，要嗰啲行喺嗰度正正出現一次、冇改過；寫唔到記 `run-no-place`。
+- N3 頁面嘅標點係兩個引擎同一個 gap 嘅標點調亂咗次序（例如括號清空咗寫成 `）（`），兩個引擎成個 gap 一樣：按引擎嘅次序重寫，連數字；每個標點用返頁面自己嗰個（同類，冇就用同係開或者同係閂嗰個），唔換字形。
+- N2 兩個引擎喺同兩個字之間都讀到成行冇漢字嘅西文（書目條目、英文腳註），一樣：喺頁面嗰個換行位寫做自己一段；engine A 斷開、engine B 讀做一行嘅，合做一段。條件：頁面嗰個 gap 得一處換行；engine A 喺嗰啲行之間冇第二啲行；唔喺清單兩項之間；行頭唔係自己一個數；嗰行唔係 engine A 標做書眉、頁腳、頁碼嘅 block。兩個引擎分行一樣、淨係其中幾行唔同：一樣嘅行照寫，唔同嘅記 `run-engines-differ`。頁面嗰度多出嚟、屬於嗰啲行嘅括號（標點模型喺裁圖見到，冇行可以放）寫行嗰陣刪。頁面已經有嗰啲字就唔郁。封存做空頁而兩個引擎都讀到成版西文：有數字或者字母嘅行全部寫（自己企一行嘅成個頁碼除外），唔一樣記疑點。
+- 永遠唔寫：註號——圈碼、上標（LaTeX、`<sup>`）、貼住圈碼嘅數字、行頭自己一個數（一至四位，後面係空格或者行尾；前面淨係開括號都計）、句末標點後面貼住嘅一至三位數（量過兩個引擎一齊讀錯註號嘅太多）；係本頁成個頁碼、喺引擎自己企一行嘅數；會改咗一頁第一行或者最後一行嘅種類、令 `join` 將兩段數字或者西文黐埋、或者過唔到 finalize contract 嘅改動（N4、R1 一樣檢查；淨係唔寫掂到嗰行嘅改動，原本已經有嘅問題唔算；N4 改返標題本身就係要改嗰行嘅種類，所以淨係隔籬個分頁 boundary 係 `join`——會將標題黐落另一頁嘅字度——先唔寫）；會變成清單項或者表格行嘅；模型答案寫過、或者刪過嘢嘅位。淨係一個引擎讀到嘅、兩個引擎唔同嘅、兩個引擎一樣但擺唔落嘅，都係疑點（`run-one-engine`、`run-engines-differ`、`run-no-place`）；每頁註號引擎讀到而頁面冇或者數值唔同嘅，一頁一條 `note-markers-unverified`。已知漏：行頭嘅年份會當做行頭自己一個數，唔寫，記疑點。
+
 **問 Qwen（`questions`，`_repair_questions.py`）。** 一條問題一張裁圖，答案過得檢查先寫，過唔到就記疑點，永遠唔會寫入。
 
 - 模型同第三階段一樣：用第三階段嘅 `Client`，同一個 endpoint 同 model，`--reasoning-effort` 預設 xhigh，effort ladder 一樣（答到 `--max-tokens` 都未答完就降一級再問：xhigh → medium → low → 唔推理；本機 ninfer 嘅 template 淨係有 low、medium、xhigh 三級），`--max-tokens` 預設 16000，`--max-inflight` 係 server 嘅 lanes（預設 `PROOFREAD_MAX_INFLIGHT`，冇就 8），greedy。開關：`--endpoint`、`--model`、`--reasoning-effort`、`--max-tokens`、`--max-inflight`、`--timeout`。呼叫種類係 `repair-glyph`、`repair-print`、`repair-line`、`repair-layout`、`repair-boundary`，call ledger 同報告（`model.calls`、`tokens`）照計。等佢跑完用一條阻塞指令，唔好逐分鐘查。
@@ -809,9 +820,14 @@ Annotated 命令故意唔帶 notation policy：即使來源符號已核圖，佢
 - `unit-not-in-scan`：目錄有、正文搵唔到嘅篇；M-4 嘅跳頁通常解釋到。
 - `leaves-missing`：頁碼序列喺一段 run 入面跳咗，寫明漏咗邊啲頁碼、喺邊兩頁之間。
 - `boundary-unverified`：分頁 boundary 冇定案證據，寫咗 `paragraph`（兩邊都保留，唔黐字）。
-- `heading-kind-unknown`：認唔到係乜嘢嘅標題，級數照舊。
+- `heading-kind-unknown`：認唔到係乜嘢嘅標題，級數照舊；或者目錄階段除咗 `#` 嘅標題喺一頁第一行或者最後一行、隔籬個分頁 boundary 係 `join`，`runs` 階段改唔返（改返就會黐落另一頁嘅字度）。
 - `gate-failed`：書本模型某項 gate 喺呢本書唔過，靠佢嘅規則全部唔出聲；附量到嘅數。
 - `detector-unmatched`：自動計數有命中，但冇規則或者問題處理到。
+- `run-one-engine`：數字、拉丁字或者假名淨係一個引擎讀到，頁面冇；冇寫入，附引擎讀法。engine B 對唔到嗰度（例如佢冇讀嗰頁嘅腳註）嘅，一頁合做一條，列出各處；engine B 讀到冇、或者淨係 engine B 讀到嘅，逐處一條。
+- `run-engines-differ`：兩個引擎喺同兩個字之間讀到唔同嘅數字段，頁面冇；冇寫入，附兩個讀法。
+- `run-no-place`：兩個引擎都讀到、頁面冇嘅數字段，但擺唔落：頁面標點同引擎對唔上、個位唔唯一、行頭自己一個數、句末貼住嘅短數字（似註號）、喺引擎自己企一行、頁面已有另一段數字、表格格線對唔上、搬咗去前一頁嘅表格行喺嗰度對唔返、目錄頁碼喺上一行行尾冇著落（留喺行頭）、頁首頁尾過唔到檢查、模型答案寫過嘅位。
+- `retry-marks-unverified`：重試過嘅標點段，第一次答案同 engine A 一樣而頁面唔同，但冇寫返（engine B 唔同、頁面有第一次答案冇嘅數字或者 markup、有模型答案、嗰段頭尾引擎同頁面嘅換行唔一致、行頭數字、頁首頁尾）；或者嗰段有重試寫咗、第一次答案同 engine A 都冇嘅標點（一段一條，附數目）。
+- `note-markers-unverified`：一頁入面引擎讀到嘅註號，頁面冇或者數值唔同；一頁一條，附例子。註號唔會由呢個階段寫。
 
 Phase 3 已經封存嘅疑點（例如 `punctuation-unread`）照原樣保留。
 
@@ -836,7 +852,7 @@ python3 scripts/_book_lint.py BOOK [--text 某本.md | --pages-dir DIR] [--model
 - `HEAD-FURNITURE`：係書眉、後綴或者頁碼嘅標題。
 - `HEAD-LEVELS`：標題級數分佈（淨係報告）。
 - `HEAD-NUMBER-LOST`：engine A 讀到編號、標題冇咗編號。
-- `TOC-NUMBER-LOST`：對得上正文、但冇編號嘅目錄項。
+- `TOC-NUMBER-LOST`：對得上正文、但冇編號嘅目錄項（行頭有數字、或者行尾有數字——省略號後面嘅頁碼——都算有）。
 - `TOC-UNMATCHED`：正文搵唔到嘅目錄項。
 - `HEAD-FRAGMENT`：頁頂標題其實係上一頁未完嘅句（句末有標點，或者頂格而上一頁尾欄係滿嘅）。
 - `JOIN-UNRESOLVED`：未有 boundary label 嘅 marker。

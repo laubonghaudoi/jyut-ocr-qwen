@@ -68,6 +68,7 @@ sys.path.insert(0, str(ROOT / "tests"))
 import offline  # noqa: E402,F401
 import build_draft  # noqa: E402
 import build_progress  # noqa: E402
+import _deliver  # noqa: E402
 import proofread_pages as pp  # noqa: E402
 
 PROBLEMS: list[str] = []
@@ -190,8 +191,12 @@ def check_draft() -> None:
         book.ocr(13).write_bytes(page_text(13, book.pages).encode("utf-8") + b"\xff\xfe")
         code, out, err, _ = run("build_draft.py", str(root))
         draft = (root / "draft.md").read_text(encoding="utf-8") if (root / "draft.md").is_file() else ""
-        check("draft: exit 0, one line, no stderr", code == 0 and len(out.splitlines()) == 1 and not err
-              and out.startswith(f"[draft] wrote {root / 'draft.md'}: "), f"{code} {out!r} {err[-300:]!r}")
+        # The second line is the copy beside the PDF (check_beside_pdf): this
+        # manifest names no PDF, so it says why there is none.
+        check("draft: exit 0, the draft's line and the copy's, no stderr", code == 0 and len(out.splitlines()) == 2
+              and out.startswith(f"[draft] wrote {root / 'draft.md'}: ")
+              and out.splitlines()[1].startswith("[draft] not copied beside the PDF: the page manifest ")
+              and not err, f"{code} {out!r} {err[-300:]!r}")
         check("draft: the line counts the pages", "37 pages, 3 left out by the manifest, 1 with no OCR text [12], "
               "1 read as nothing [14]" in out
               and "1 running head(s) learned ('海港商務年報第#冊')" in out, out)
@@ -651,7 +656,8 @@ def check_skill_text() -> None:
     rules = {
         "a section on the three deliveries": bool(section),
         "the draft's command": "python3 scripts/build_draft.py BOOK" in section,
-        "the draft when both engines are done": "兩個 OCR 引擎都做完" in section,
+        "the draft when engine B is done, not waiting for engine A":
+            "引擎 B（HunyuanOCR）做完就即刻跑，唔等引擎 A" in section,
         "the draft from engine B, with the measured reason": all(w in section for w in ("引擎 B", "75.8%", "5.8%")),
         "the draft's path told at once, in one line": "即刻用一行話畀用戶知草稿喺邊" in section,
         "on without waiting": "唔使等佢回覆" in section,
@@ -678,7 +684,7 @@ def check_skill_text() -> None:
         "or plain English": "簡單英文" in section,
         "never Mandarin pinyin": "唔好用普通話拼音" in section,
         "file names in English": all(f"`{name}`" in section for name in ("draft.md", "proofreading.md", "final.md")),
-        "step 3 sends to the draft": "兩個 runner 都做完就即刻出未校對草稿（`build_draft.py`）" in skill,
+        "step 3 sends to the draft, engine B first": "引擎 B 先、草稿即出、引擎 A 跟住" in skill,
         "the wait bullet: --progress in phase 3": "--progress BOOK   # phase 3" in safe
                                                   and "整唔到都唔改 exit code" in safe,
         "both builders listed": "- `scripts/build_draft.py`" in skill and "- `scripts/build_progress.py`" in skill,
@@ -690,8 +696,86 @@ def check_skill_text() -> None:
           __import__("wait_for_run").PROGRESS_EVERY == 300 and "每 5 分鐘" in section)
 
 
+def check_beside_pdf() -> None:
+    """The copies beside the PDF (scripts/_deliver.py).  build_draft.py writes
+    X-draft.md beside the X.pdf the page manifest names, and its second line
+    names it.  A copy the pipeline wrote is replaced.  One the person edited is
+    moved aside first to X-draft.edited-<time>.md.  A file the pipeline never
+    wrote is left alone.  There is no copy when the PDF has moved or changed or
+    the folder cannot be written to, or with --no-deliver.  finish_book.py's
+    copies are check_finish_book's."""
+    with tempfile.TemporaryDirectory() as tmp:
+        shelf = Path(tmp) / "shelf"
+        shelf.mkdir()
+        pdf = shelf / "海港商務年報 第二冊.pdf"
+        pdf.write_bytes(b"%PDF-1.4 made up\n")
+        book = Book(Path(tmp) / "work" / "haigong-soengmou", pages=12)
+        root = book.root
+        manifest = json.loads((root / "page-manifest.json").read_text(encoding="utf-8"))
+        manifest.update(source_pdf=str(pdf), source_sha256=pp.sha256_file(pdf))
+        (root / "page-manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+        copy = shelf / "海港商務年報 第二冊-draft.md"
+        code, out, err, _ = run("build_draft.py", str(root))
+        check("beside: the draft copied as X-draft.md", code == 0 and copy.is_file()
+              and copy.read_bytes() == (root / "draft.md").read_bytes(), f"{code} {out!r} {err[-300:]!r}")
+        check("beside: the second line names the copy", out.splitlines()[1:] == [f"[draft] beside the PDF: {copy}"],
+              out)
+        check("beside: nothing else written beside the PDF",
+              sorted(p.name for p in shelf.iterdir()) == sorted([pdf.name, copy.name]),
+              str(sorted(p.name for p in shelf.iterdir())))
+        again = _deliver.deliver(root, "draft", b"second draft")
+        check("beside: the pipeline's own copy is replaced", again.written and copy.read_bytes() == b"second draft"
+              and again.kept_as is None, again.line())
+        copy.write_bytes(b"second draft, corrected by the person")
+        edited = _deliver.deliver(root, "draft", b"third draft")
+        aside = shelf / (edited.kept_as or "-")
+        check("beside: a copy the person edited is moved aside, then written",
+              edited.written and copy.read_bytes() == b"third draft" and aside.name.startswith(
+                  "海港商務年報 第二冊-draft.edited-") and aside.read_bytes() == b"second draft, corrected by the person",
+              edited.line())
+        theirs = shelf / "海港商務年報 第二冊.md"
+        theirs.write_bytes(b"another tool's transcript")
+        foreign = _deliver.deliver(root, "final", b"the book")
+        check("beside: a file the pipeline never wrote is left alone, nothing written",
+              not foreign.written and theirs.read_bytes() == b"another tool's transcript"
+              and "was not written by this book's pipeline" in foreign.reason and str(root) in foreign.reason,
+              foreign.line())
+        doubts = _deliver.deliver(root, "doubts", _deliver.doubts_for_copy(
+            "呢份係 `final.md` 嘅疑問清單", _deliver.copy_name(pdf, "final")).encode("utf-8"))
+        check("beside: the doubt list as X-doubts.md, its final.md reading X.md", doubts.written
+              and doubts.path == shelf / "海港商務年報 第二冊-doubts.md"
+              and doubts.path.read_text(encoding="utf-8") == "呢份係 `海港商務年報 第二冊.md` 嘅疑問清單", doubts.line())
+        copy.unlink()
+        code, out, _, _ = run("build_draft.py", str(root), "--no-deliver")
+        check("beside: --no-deliver writes no copy and no second line",
+              code == 0 and not copy.exists() and len(out.splitlines()) == 1, out)
+        pdf.write_bytes(b"%PDF-1.4 another book\n")
+        changed = _deliver.deliver(root, "draft", b"draft")
+        check("beside: a PDF that is not the book's: no copy", not changed.written and not copy.exists()
+              and "not the PDF this book was rendered from" in changed.reason, changed.line())
+        pdf.rename(shelf / "renamed.pdf")
+        code, out, _, _ = run("build_draft.py", str(root))
+        check("beside: the PDF moved: no copy, the line says why, exit 0", code == 0 and not copy.exists()
+              and out.splitlines()[1].startswith(f"[draft] not copied beside the PDF: the PDF is no longer at {pdf}"),
+              out)
+        locked = Path(tmp) / "locked"
+        locked.mkdir()
+        other = locked / "b.pdf"
+        other.write_bytes(b"%PDF-1.4 b\n")
+        manifest.update(source_pdf=str(other), source_sha256=pp.sha256_file(other))
+        (root / "page-manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+        locked.chmod(0o555)
+        try:
+            denied = _deliver.deliver(root, "draft", b"draft")
+        finally:
+            locked.chmod(0o755)
+        check("beside: a folder that cannot be written to: no copy, a reason, no exception",
+              os.geteuid() == 0 or (not denied.written and "could not be written" in denied.reason), denied.line())
+
+
 def main() -> int:
     check_draft()
+    check_beside_pdf()
     check_numbered_text()
     check_loops()
     check_progress()

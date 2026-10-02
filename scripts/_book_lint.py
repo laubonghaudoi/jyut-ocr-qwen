@@ -59,6 +59,9 @@ REPORT_ONLY = frozenset({"HEAD-LEVELS", "PARA-DISAGREE"})
 HEADING = re.compile(r"^ {0,3}(#{1,6})[ \t]+")
 LINE_PREFIX = re.compile(r"^\s*(?:#{1,6}\s+|[-*+]\s+|\d+[.)]\s+|>\s*)?")
 FIGURE_START = re.compile(r"^\s*(?:[-*+]\s+)?(?:#{1,6}\s+)?[\[［(（]?\s*[0-9０-９]")
+# A contents entry that ends with a figure (its page number, after the
+# leaders) holds its number too.
+FIGURE_END = re.compile(r"[0-9０-９][\s*]*$")
 BRACKETED_FIGURE = re.compile(r"[（(]\s*([0-9０-９]{1,3})\s*[)）]")
 LINE_FIGURE = re.compile(r"\n[ \t]*[\[［(（]?[ \t]*([0-9０-９]{1,3})")
 SHAPE = re.compile(r"[\[\]︵︶]|（[^（）\n]{1,3}[、，]）")
@@ -335,7 +338,7 @@ def lint_page(job: Mapping[str, Any]) -> dict[str, list[dict[str, Any]]]:
         if number is None:
             continue
         line = lines[number - 1]
-        if row.get("matchedPage") is not None and not FIGURE_START.match(line):
+        if row.get("matchedPage") is not None and not FIGURE_START.match(line) and not FIGURE_END.search(line):
             out["TOC-NUMBER-LOST"].append(hit(scan, number, line))
         if row.get("matchedPage") is None and not row.get("inText") and not HEADING.match(line) \
                 and number not in head_lines and not any(line_core(line).startswith(s) for s in suffixes):

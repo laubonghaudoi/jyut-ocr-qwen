@@ -19,9 +19,9 @@ harness apart from a cold prefix cache on the next turn.
 It does not work in the background.  Measured 2026-09-23 in Qwen Code: the agent
 backgrounded the handover because a whole book outlasts the harness's shell time
 limit (120 s by default, 600 s at most); its next turn found the server stopped
-(ECONNREFUSED), it gave up after two retries and exited, and its exit killed the
-handover - SIGTERM to the process group, SIGKILL 200 ms later - before the
-server came back.  So this script:
+(ECONNREFUSED), retried the refused connection 7 times over about 76 s, gave up
+and exited, and its exit killed the handover - SIGTERM to the process group,
+SIGKILL 200 ms later - before the server came back.  So this script:
 
 - skips the swap entirely when there is already enough free VRAM;
 - takes a time budget (--max-seconds, or OCR_PHASE_MAX_SECONDS from the machine
@@ -45,8 +45,18 @@ since this skill runs on many hosts):
     export OCR_PHASE_MAX_SECONDS=540   # below the harness's shell time limit
 
     python3 scripts/run_ocr_phase.py -- \\
-        python3 scripts/run_paddleocr_vl.py RENDER_DIR OUTPUT_DIR
+        python3 scripts/run_hunyuanocr.py RENDER_DIR OUTPUT_DIR
     # exit 75: run the same command again; exit 0: done
+
+A shell with NO time limit (the person removed the harness's cap, e.g. Qwen
+Code `tools.shell.defaultTimeoutMs: 0`, and checked it) runs a whole book in
+one call: OCR_PHASE_MAX_SECONDS=0 with OCR_PHASE_UNLIMITED_SHELL=1 (or
+--unlimited-shell).  Without that flag a budget of 0 is refused when the
+server has to be stopped, so a machine config that only says 0 falls back to
+an error naming the fix rather than to a call the harness kills at its cap
+(measured cost of the cap on one 609-page book: 8 chunk boundaries of about
+40 s each for engine A alone, 7.5 min for the two engines, each boundary a
+full re-prefill of the agent's 100K-token context).
 
 Exit codes: 0 done; 75 time budget spent, server restored, call again;
 2 configuration; 3 the server was NOT restored; otherwise the runner's own.
@@ -435,6 +445,13 @@ def build_parser() -> argparse.ArgumentParser:
              f"server (default {DEFAULT_RESTORE_RESERVE:.0f})",
     )
     parser.add_argument(
+        "--unlimited-shell",
+        action="store_true",
+        default=os.environ.get("OCR_PHASE_UNLIMITED_SHELL", "").strip().lower() in ("1", "true", "yes"),
+        help="the shell running this call has no time limit, so --max-seconds 0 may stop the "
+             "server for a whole book in one call (env: OCR_PHASE_UNLIMITED_SHELL=1)",
+    )
+    parser.add_argument(
         "--force-swap",
         action="store_true",
         help="release/restore even if free VRAM already looks sufficient",
@@ -540,8 +557,21 @@ def swap_and_run(arguments: argparse.Namespace, runner: list[str], env: dict[str
         say(
             "ERROR stopping the server needs a time budget: set OCR_PHASE_MAX_SECONDS "
             "(machine config) or --max-seconds below the harness's shell time limit, "
-            "and run this in the FOREGROUND. Outside an agent harness, --max-seconds 0 "
+            "and run this in the FOREGROUND. In a shell with no time limit, "
+            "--max-seconds 0 with --unlimited-shell (OCR_PHASE_UNLIMITED_SHELL=1) "
             "runs without one.",
+            error=True,
+        )
+        return 2
+    if not budgeted and not arguments.unlimited_shell:
+        # A budget of 0 is only safe where nothing will kill the call: say so
+        # rather than run into the harness's cap with the server down.
+        say(
+            "ERROR --max-seconds 0 (no budget) stops the server for as long as the "
+            "whole book takes, which a shell with a time limit kills mid-way. Set "
+            "OCR_PHASE_UNLIMITED_SHELL=1 (or --unlimited-shell) only when this shell "
+            "has no time limit and that was checked; otherwise set OCR_PHASE_MAX_SECONDS "
+            "below the limit.",
             error=True,
         )
         return 2

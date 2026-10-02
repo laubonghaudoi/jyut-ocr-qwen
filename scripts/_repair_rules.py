@@ -975,6 +975,12 @@ def lost_at_edges(pd: PageData, facts: BookFacts) -> list[dict[str, Any]]:
 # opening a line.
 STRUCTURE = re.compile(r"(?:\n+|^)(?:[ \t]*(?:#{1,6}|[-*+])[ \t]+)|\n+")
 FIGURE_GAP = re.compile(r"(?P<pre>[^（0-9０-９]*)(?P<fig>（[0-9０-９]{1,3}）)(?P<post>[^0-9０-９]*)")
+# What an engine writes about a figure that is not print: LaTeX wrappers and
+# commands, and note markers (circled or superscript figures).  Measured on a
+# modern book (2026-10-01): engine A wrote `」。 $ ^{㉑}(2) $` for a footnote's
+# number and an item's, and K1 copied the wrapper into the page.
+SUPERSCRIPT_FIGURE = re.compile(r"\^\{[^{}]*[（(][0-9０-９]{1,3}[）)][^{}]*\}")
+ENGINE_MARKUP = re.compile(r"\$|\\[A-Za-z]+|[\^{}]|[\u2460-\u24ff\u3251-\u325f\u32b1-\u32bf\u2070-\u2079\u00b9\u00b2\u00b3]")
 LINE_FIGURE_GAP = re.compile(r"(?P<pre>[^0-9０-９]*?)(?P<d>[0-9０-９]{1,3})(?P<dot>[.．])?")
 LINE_FIGURE_END = re.compile(r"\n\s*[0-9０-９]{1,3}\s*[.．]?\s*$")
 
@@ -1123,6 +1129,10 @@ class Marks:
         content = "".join(t for kind, t in tokens if kind == "c")
         if not match or len(non) > 4 or not (non or "）（" in content or "（）" in content):
             return None
+        if SUPERSCRIPT_FIGURE.search(gap):
+            # A figure engine A wrote inside a superscript: a note's number,
+            # not an item's.
+            return None
         figure_glyphs = self.figure_glyphs(k1, k2)
         strange = [c for c in non if not self.accounted(c, gap, figure_glyphs)]
         if strange:
@@ -1131,13 +1141,22 @@ class Marks:
                             "engine A read a bracketed figure here, and the page holds characters that are not "
                             "engine B's stand-ins for what engine A read there", engineA=gap,
                             characters="".join(strange))
+        figure = match["fig"].translate(ra.FULLWIDTH_DIGITS)
         first = min([content.index(c) for c in non if c in content]
                     + [content.index(x) for x in ("）（", "（）") if x in content] + [len(content)])
         lead = content[:first].replace("（", "")
-        pre = match["pre"]
-        add = pre if not lead.endswith(pre) else ""
-        figure = match["fig"].translate(ra.FULLWIDTH_DIGITS)
-        new = with_structure(tokens, lead + add, figure + match["post"])
+        pre = ENGINE_MARKUP.sub("", match["pre"])
+        post = ENGINE_MARKUP.sub("", match["post"])
+        if re.search(r"[^\W\d_]", pre + post):
+            # Letters beside the figure (Latin, kana, any script): text one
+            # engine read, which this rule does not write.
+            return None
+        # The page's marks before the figure are engine A's already when they
+        # end the lead once a note marker the page holds after them is set
+        # aside.  Measured on a modern book (2026-10-02): comparing with the
+        # marker in place wrote engine A's marks a second time.
+        add = pre if not ENGINE_MARKUP.sub("", lead).endswith(pre) else ""
+        new = with_structure(tokens, lead + add, figure + post)
         return new, "K1", {"figure": figure_value(figure[1:-1]), "style": "bracket", "standIns": "".join(non),
                            "aIndex": self.to_a[k2]}
 

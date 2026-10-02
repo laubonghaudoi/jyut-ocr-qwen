@@ -38,6 +38,11 @@ DOUBT_KINDS = (
     "heading-kind-unknown",  # a heading no rule can place
     "gate-failed",           # a rule family off for this book, with its measurement
     "detector-unmatched",    # a lint hit that no rule or question covers
+    "run-one-engine",        # a text run (digits, Latin, kana) one engine alone read where the page has none
+    "run-engines-differ",    # the engines read different text runs between the same two characters
+    "run-no-place",          # a text run both engines read that the page lacks, with no clean place for it
+    "retry-marks-unverified",  # a refused first answer's marks engine A confirms, not written back
+    "note-markers-unverified",  # a page's note numbers the engines read that the page lacks or writes otherwise
 )
 
 
