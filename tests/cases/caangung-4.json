@@ -1,0 +1,77 @@
+{
+ "book": "剷共半月刊 第四期",
+ "bookId": "caangung-4",
+ "source": {
+  "pdf": "/home/laubonghaudoi/Documents/GitHub/jyut-ocr-corpus/caangung-4/caangung-4.pdf",
+  "sha256": "1b6f613b9f960f4b945e176266d5b4e9c8773e3177f7a7de8df282f62a839750",
+  "pages": 63,
+  "titleFrom": "the colophon printed on scan p.2 (中華民國十九年十一月十日出版 / 剷共半月刊 / 第四期)",
+  "renderSha256": {
+   "2": "990e8eba975a417ac11f8e19e451cf7c120f19d4b21ae4e6e5de5112708da283",
+   "3": "8913b21f17999c5ab8cff67bafc6d7ede930929309eb67d374d909e697ab095e"
+  },
+  "renderSha256From": "sha256 of jyut-ocr-corpus/caangung-4/renders/page-000N.png, 2026-09-26"
+ },
+ "traits": [
+  "vertical-rtl",
+  "traditional-han",
+  "new-style-punctuation",
+  "magazine",
+  "notice-list",
+  "colophon",
+  "small-table",
+  "table-of-contents",
+  "dot-leaders",
+  "oversized-scan-77-83MP",
+  "library-seal"
+ ],
+ "notCovered": [
+  "horizontal layout",
+  "simplified han",
+  "long prose",
+  "footnotes",
+  "cross-page tables"
+ ],
+ "assertions": [
+  {
+   "id": "golden-2-h1",
+   "page": 2,
+   "type": "golden_page",
+   "value": "caangung-4/page-0002.md",
+   "provenance": "human",
+   "note": "user golden (canvas 'New Case Goldens' (artifact 6ckf8kXvoqpC3fD7jmdxMz), accepted by the user 2026-09-26): the whole page - ▲本刊徵文簡約 and its six items with the printed new-style marks (， ： ； 「」 （）), the colophon one entry per line, and the 實價表 as an HTML table, one record per row (rearranged 2026-09-27, see table-2-h2). Printed forms kept: 卽, 尙, 况, 册, 衆. The scan is 77 MP: the first run (n1) lost the page to the vision server's pixel budget; after the fix (n2) the page completed but wrote 丶 for the commas and enumeration commas (13 of 17 ， and all 6 、; 4 ， dropped), 厶 for ▲, stray 口 and 爹."
+  },
+  {
+   "id": "table-2-h2",
+   "page": 2,
+   "type": "golden_table",
+   "value": "caangung-4/page-0002.md",
+   "provenance": "human",
+   "note": "the 實價表 in golden-2-h1. Rearranged 2026-09-27 to the user's convention (round-2 register, tableOrientation: a table printed in vertical columns is written one record per row; scoring accepts either orientation): the title row 實價表 (colspan 3), then one record per row - 全年念四期｜一元二角, 半年十二册｜六角, 一册｜五分 - with the postage note 郵費在內，代售處得另加手續費每册一分 as the third cell of the first record, rowspan 3, since the print sets it as one column beside all three records. Same characters as the 2026-09-26 golden, only the arrangement: that golden wrote each printed column as a row (periods, prices, then the note as a colspan-3 row), which is this grid transposed under its title row and is still scored right (golden_table compares each table as written and transposed, _tables.orientations, and names the one it scored)."
+  },
+  {
+   "id": "absent-2-h3",
+   "page": 2,
+   "type": "absent",
+   "value": "丶",
+   "provenance": "regression",
+   "note": "n2 (2026-09-25) wrote the radical 丶 for 13 of the 17 printed commas ， and for all 6 enumeration commas 、 after the item numerals (the other 4 commas were dropped); the page prints no 丶."
+  },
+  {
+   "id": "absent-2-h4",
+   "page": 2,
+   "type": "absent",
+   "value": "厶",
+   "provenance": "regression",
+   "note": "n2 wrote 厶 for the printed bullet ▲ (本刊徵文簡約); the page prints no 厶."
+  },
+  {
+   "id": "golden-3-h5",
+   "page": 3,
+   "type": "golden_page",
+   "value": "caangung-4/page-0003.md",
+   "provenance": "human",
+   "note": "user golden (canvas 'New Case Goldens' (artifact 6ckf8kXvoqpC3fD7jmdxMz), accepted by the user 2026-09-26): the table of contents, one entry per line as 篇名……作者 (the dot leaders are printed), entries without an author as the title alone, the 通信 sub-entry indented. 顚公 as printed (twice). 曙霞: the second character is an ink blot on this page, read from the article's own byline on scan p.41."
+  }
+ ]
+}
