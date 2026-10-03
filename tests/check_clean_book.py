@@ -832,8 +832,9 @@ def skill_checks() -> None:
                               and "`MANIFEST_DIR`" in finish and "`render_sha256`" in finish and "照抄" in finish,
         "a run still working on the book": "wait_for_run.py" in finish and "exit 3" in finish and "安全並行" in finish,
         "stopped part way": "`cleanup stopped`" in finish and "`stopped`" in finish,
-        "--all only when the user asks, and its refusals": "python3 scripts/clean_book.py BOOK --all" in finish
-                                                           and "用戶叫先" in finish and all(w in finish for w in (
+        "--all as the last step after a delivery, and its refusals": "python3 scripts/clean_book.py BOOK --all" in finish
+                                                           and "最後一步" in finish and "2026-10-03" in finish
+                                                           and all(w in finish for w in (
                                                                "`backup-…/`", "`.git/`", "`assembled/page-sources.json`",
                                                                "`*.edited-…md`")),
         "the switches named": all(f"`{s}`" in skill for s in ("--keep-work", "--clean-renders", "--dry-run",

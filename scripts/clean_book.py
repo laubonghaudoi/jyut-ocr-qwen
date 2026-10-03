@@ -74,8 +74,10 @@ with one line saying which, and nothing is removed:
   default cleanup still runs; --all is refused and says why.
 
 --all removes the whole book folder (with everything in it) and the
-unedited X-draft.md, nothing else: for when the person wants the space
-back entirely, with X.md and X-doubts.md beside the PDF as the book.  It
+unedited X-draft.md, nothing else: the last step after a delivery
+(SKILL.md; the user's decision of 2026-10-03: the work folder goes, X.md
+and X-doubts.md beside the PDF are the book, a repair in place is given
+up for the space).  It
 is refused, nothing removed, when X.md or X-doubts.md beside the PDF was
 edited (the folder is then the only copy of the pipeline's text); when the
 PDF, X.md or X-doubts.md lies inside BOOK (they would go with it); when
@@ -919,7 +921,7 @@ def build_parser() -> argparse.ArgumentParser:
                         help="keep the renders folder (what finish_book.py's fifth step does); the rest goes")
     parser.add_argument("--all", action="store_true",
                         help="remove the whole book folder and the unedited X-draft.md beside the PDF, nothing else "
-                             "(only when the person asks for the space back entirely; refused when X.md or "
+                             "(the last step after a delivery, SKILL.md; refused when X.md or "
                              "X-doubts.md beside the PDF was edited or lies inside the folder, when the folder holds "
                              "*.edited-*.md, backup-*/ or .git, or when a sealed page changed since final.md)")
     return parser
