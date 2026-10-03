@@ -137,7 +137,87 @@ def check_figure_grouping() -> None:
     blocks = [{"text": html([[c] for c in a_cells]), "label": "table", "box": [0, 0, 1, 1]}]
     _, rejected, _, _, sealed = pp.recover_tables(blocks, merged, witness=b_text)
     assert not rejected and [n.split(":")[0] for n in sealed["figureGrouping"]] == ["block 0", "block 0"], sealed
-    print("figure grouping: engine B's marks where A's do not fit the page or the merge changed the digits")
+    assert not sealed["doubts"], sealed["doubts"]
+    # A note marker in a cell is sealed with a doubt: nothing checks it.
+    noted = [c + (" $ ^{{①⑨}} $" if c == a_cells[1] else "") for c in a_cells]
+    blocks = [{"text": html([[c] for c in noted]), "label": "table", "box": [0, 0, 1, 1]}]
+    _, rejected, _, _, sealed = pp.recover_tables(blocks, merged, witness=b_text + " ⑲")
+    assert not rejected and [d["kind"] for d in sealed["doubts"]] == ["table-note-marker-unverified"] \
+        and "①⑨" in sealed["doubts"][0]["detail"], (rejected, sealed["doubts"])
+    print("figure grouping: engine B's marks where A's do not fit the page or the merge changed the digits; "
+          "a note marker in a cell is a doubt")
+
+
+def check_vouched_grid() -> None:
+    """A grid refused on engine A's word alone - a cell wrapped onto two lines,
+    a merged cell - is accepted when engine B's own <table> agrees with it
+    cell for cell (vouched_grid); the shapes are the modern book's (p.316,
+    p.281, p.270, p.382, p.42), the text made up."""
+    rows = [["1514", "正德九年", "戶部禁止行廣鹽。", "—", "《武宗實錄》116/1b"],
+            ["1517", "正德十二年", "戶部稱廣鹽暫發賣。", "6395.65兩", "《王陽明全集》11/386"],
+            ["1518", "正德十三年", "戶部題廣鹽止行南贛。", "—", "《世宗實錄》62/1b；\\n《王陽明全集》11/384"],
+            ["1519", "正德十四年", "戶部允行廣鹽。", "—", "《武宗實錄》177/4b"]]
+    a_table = html(rows)
+    flat = [[c.replace("\\n", "") for c in row] for row in rows]
+    b_text = "第四章\n" + html(flat) + "\n⑲ 註文。"
+    # Refused on engine A's word alone, as before.
+    table, why = pp.engine_table(a_table, witness="第四章 戶部禁止行廣鹽 註文")
+    assert table is None and "hold line breaks" in why and "engine B wrote no grid" in why, why
+    # Engine B's grid agrees: accepted, the wrapped cell written on one line with <br>.
+    table, why = pp.engine_table(a_table, witness=b_text)
+    assert table and "vouched by engine B's grid (17 cells, 0" in why, why
+    assert "| 1514 | 正德九年 |" in table and "《世宗實錄》62/1b；<br>《王陽明全集》11/384" in table, table
+    # A character or two apart in a cell or two (a variant sort, a dropped
+    # character) is the same cell read apart: still vouched.
+    near = [row[:] for row in flat]
+    near[1][2] = "戶部称廣鹽暫發賣。"
+    table, why = pp.engine_table(a_table, witness=html(near))
+    assert table and "1 read a character or two apart" in why, why
+    # Engine B wraps the same cell: the two may both have collapsed columns there; refused.
+    same_break = [row[:] for row in flat]
+    same_break[2][4] = "《世宗實錄》62/1b；<br>《王陽明全集》11/384"
+    table, why = pp.engine_table(a_table, witness=html(same_break))
+    assert table is None and "engine B's grid wraps the same cell" in why, why
+    # Engine B's grid of another shape, or with cells shifted into their
+    # neighbours (p.270: 明殷從儉 / 明), or more cells apart than a tenth: refused.
+    table, why = pp.engine_table(a_table, witness=html([row + [""] for row in flat]))
+    assert table is None and "engine B's grid is 4 rows x 6 columns" in why, why
+    shifted = [[r[0] + r[1], r[2], r[3], r[4], ""] for r in flat]
+    table, why = pp.engine_table(a_table, witness=html(shifted))
+    assert table is None and "reads" in why and "cells otherwise, e.g. row 1 column 1" in why, why
+    apart = [row[:] for row in flat]
+    apart[0][2], apart[1][2], apart[2][2] = "戶部禁行廣鹽。", "戶部稱廣鹽發賣。", "戶部題廣鹽止南贛。"
+    table, why = pp.engine_table(a_table, witness=html(apart))
+    assert table is None and "reads 3 of 17 cells otherwise" in why, why
+    # A figure in another slot is a difference too (the figures' column shifted a row).
+    moved = [row[:] for row in flat]
+    moved[0][0], moved[1][0] = moved[1][0], moved[0][0]
+    table, why = pp.engine_table(a_table, witness=html(moved))
+    assert table is None and "reads 2 of 17 cells otherwise" in why, why
+
+    # A merged cell: refused alone, HTML with the rowspan when engine B lays it the same way.
+    spanned = ("<table><tr><td>設置時間</td><td>內容</td><td>出處</td></tr>"
+               "<tr><td rowspan=\"2\">弘治七年說</td><td>設巡撫都察院於贛。</td><td>《贛州府志》2/12a</td></tr>"
+               "<tr><td>始添巡臣於贛。</td><td>《虔臺志》1/3b</td></tr>"
+               "<tr><td>弘治八年說</td><td>以金澤巡撫南贛。</td><td>《明史》</td></tr></table>")
+    table, why = pp.engine_table(spanned, witness="設置時間 內容 出處 弘治七年說")
+    assert table is None and "merged layout unverified" in why and "engine B wrote no grid" in why, why
+    table, why = pp.engine_table(spanned, witness="<table><caption></caption>" + spanned[7:])
+    assert table and table.startswith("<table>") and 'rowspan="2">弘治七年說' in table and "1 merged cell(s)" in why, why
+    # Engine B writing the merged cell's text in both rows agrees with the
+    # merge; an empty slot where engine A spans does not, however few.
+    repeated = spanned.replace(' rowspan="2"', "").replace("<tr><td>始添", "<tr><td>弘治七年說</td><td>始添")
+    table, why = pp.engine_table(spanned, witness=repeated)
+    assert table and 'rowspan="2">弘治七年說' in table, why
+    blank = spanned.replace(' rowspan="2"', "").replace("<tr><td>始添", "<tr><td></td><td>始添")
+    table, why = pp.engine_table(spanned, witness=blank)
+    assert table is None and "merged layout unverified" in why and "row 3 column 1 (弘治七年說 / empty)" in why, why
+    # The vouched grid still passes the other evidence: a cell of digits engine B's text lacks.
+    stranger = [row[:] for row in flat]
+    stranger[0][0] = "1541"
+    table, why = pp.engine_table(a_table, witness=html(stranger))
+    assert table is None and "letters or digits that neither" in why, why
+    print("vouched grid: a wrapped or merged cell accepted on both engines' grids, refused on one")
 
 
 def between(text: str) -> str:
@@ -2582,6 +2662,7 @@ def check_window_table_marks_unread() -> None:
 if __name__ == "__main__":
     check_single_line_orientation()
     check_figure_grouping()
+    check_vouched_grid()
     check_tables_bypass_the_formatter()
     check_joined_tables_split()
     check_cell_direction()

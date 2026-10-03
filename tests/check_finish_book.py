@@ -354,6 +354,15 @@ def rerun_checks(tmp: Path, book: Path) -> None:
     check(all((book / n).read_bytes() == data[n] and (book / n).stat().st_mtime_ns == times[n] for n in data),
           "run again: final.md and doubts.md keep their bytes and times")
 
+    # The book's folder copied: the copy's repair names the first book's files,
+    # which are unchanged, and is still not kept as the copy's own.
+    copy = tmp / "copied-book"
+    shutil.copytree(book, copy, symlinks=True)
+    code, lines = finish(copy, "--no-model")
+    check(code == 0 and report(copy)["steps"]["repair"]["status"] == "resumed"
+          and (copy / "final.md").read_bytes() == data["final.md"],
+          f"a copied book: the repair of the first book's files is not kept, it is resumed ({lines[:1]})")
+
     # An earlier repair left half way (its report says running): resumed.
     path = book / "repaired" / "repair-report.json"
     path.write_text(json.dumps({"tool": "repair_book", "status": "running"}), encoding="utf-8")

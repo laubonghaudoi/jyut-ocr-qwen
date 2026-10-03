@@ -218,7 +218,15 @@ class Assembly:
         for scan in self.order:
             out.append(self.marker_lines[scan])
             text = texts[scan].strip() if scan in texts else self.bodies[scan]
-            out.append(self.leads[scan] + text + self.trails[scan])
+            lead, trail = self.leads[scan], self.trails[scan]
+            if text and not self.bodies[scan]:
+                # A page sealed empty has no frame of its own (its whitespace
+                # is all lead, its trail is empty): a text written into it
+                # takes the skill's frame, a blank line each side, or it runs
+                # into the next marker (the modern book's title page, scan 3,
+                # written by N2: `2002<!-- page_004 -->` failed the contract).
+                lead, trail = "\n", "\n\n" if scan != self.order[-1] else "\n"
+            out.append(lead + text + trail)
         return "".join(out)
 
 

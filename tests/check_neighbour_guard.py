@@ -208,6 +208,23 @@ record, text, _ = run(SUB_A, SUB_B, lambda a, b: LEAD[13], extra=SWITCH)
 check("on: the text three places away is not a copy",
       (text, [a["resolved_from"] for a in record["adjudications"]]), (LEAD[:10] + LEAD[13] + LEAD[11:], ["adjudicator"]))
 
+# A line engine B read twice (the modern book's scan 33: the body line after a
+# footnote marker came back once more with a stray marker), engine A once;
+# 裁決, shown the spot between the two copies, confirms the line.  It is an
+# engine's reading, so it is written, and the page says so (neighbour-copy):
+# the line may be printed once.
+LINE = "目前對於閩粵贛邊界地區的研究仍方興未艾"
+TWICE_A = LEAD + LINE
+TWICE_B = LEAD + LINE + LINE
+record, text, _ = run(TWICE_A, TWICE_B, lambda a, b: LINE)
+check("a one-engine reading confirmed beside its own copy: written, with the doubt",
+      (text, [a.get("copyBeside") for a in record["adjudications"]],
+       [d["kind"] for d in record["doubts"]], "ONE-ENGINE READING WRITTEN BESIDE ITS OWN COPY" in (record["doubts"] or [{}])[0].get("detail", "")),
+      (LEAD + LINE + LINE, ["before"], ["neighbour-copy"], True))
+record, text, _ = run(TWICE_A, LEAD + LINE + "山居雜記卷三頁十二至十五", lambda a, b: "山居雜記卷三頁十二至十五")
+check("... not when the reading is other text", ([a.get("copyBeside") for a in record["adjudications"]], [d["kind"] for d in record["doubts"]]),
+      ([None], []))
+
 
 # --- Sealed only when on, and a key a resume compares when absent.
 on_seal = pp.decision_provenance(SimpleNamespace(prefer_engine="A", fallback_engine="A", neighbour_guard=True))

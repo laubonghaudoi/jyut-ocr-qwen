@@ -265,7 +265,7 @@ def check_resume_rederives() -> None:
         job = SimpleNamespace(out_json=root / "out" / "page-0001.json", out_md=root / "out" / "page-0001.md")
         current, why = pp.validate_completion(job, expect)
         assert not current and why.endswith(
-            "sealed with --keep-arabic-numerals, --loop-detector, --neighbour-guard, --learned-heads off, this run "
+            "sealed with " + ", ".join(pp.ROUND4_DEFAULTS) + " off, this run "
             "has them on (resume with " + " ".join(old_defaults) + ")"), why
         assert (root / "out" / "page-0001.json").read_bytes() == before
         status = pp.main(arguments + old_defaults)
@@ -319,7 +319,7 @@ def check_resume_one_way() -> None:
             assert run("--pages", "1-2", *old_defaults) == (0, "")
             before, calls, report = sealed(), len(model.calls), (root / "r.json").read_bytes()
             resume = ("ERROR resume with " + " ".join(old_defaults) + f": 2 sealed page(s) in {out} (1-2) were "
-                      "decided with --keep-arabic-numerals, --loop-detector, --neighbour-guard, --learned-heads off, "
+                      "decided with " + ", ".join(pp.ROUND4_DEFAULTS) + " off, "
                       "this run the other way; a book is decided one way throughout, so nothing was proofread")
             # Resumed with the new defaults, the selection its sealed pages
             # and more, other pages only, or one of them decided again: the
@@ -330,7 +330,7 @@ def check_resume_one_way() -> None:
                     "(1-2)", "(2)") if "--overwrite" in extra else resume), (extra, said)
             assert sealed() == before and len(model.calls) == calls, "a run that did not start wrote or asked"
             assert (root / "r.json").read_bytes() == report, "a run that did not start wrote a report"
-            # With the four --no-* switches it resumes: the sealed pages are
+            # With the --no-* switches it resumes: the sealed pages are
             # current, the rest decided with the fixes off like them.
             assert run("--pages", "1-4", *old_defaults) == (0, "")
             counts = json.loads((root / "r.json").read_text(encoding="utf-8"))["counts"]
@@ -352,8 +352,8 @@ def check_resume_one_way() -> None:
             for extra in ((), tuple(old_defaults)):
                 status, said = run("--pages", "3", *extra)
                 assert status == 2 and said.startswith(
-                    f"ERROR the sealed pages in {out} were decided with the round-4 fixes set in 2 ways: pages 1, "
-                    "3-4 with --keep-arabic-numerals, --loop-detector, --neighbour-guard, --learned-heads on; pages "
+                    f"ERROR the sealed pages in {out} were decided with the on-by-default switches set in 2 ways: pages 1, "
+                    "3-4 with " + ", ".join(pp.ROUND4_DEFAULTS) + " on; pages "
                     "2 with none of"), said
             # Deciding every page again with --overwrite makes it one way.
             assert run("--pages", "1-4", "--overwrite", *old_defaults) == (0, "")

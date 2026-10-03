@@ -14,6 +14,28 @@ repair and a look-alike it must leave:
   cell's figure where the page's row has the empty cell; a figure in a
   table row that phase 3 moved to the page before (the seal's tableStitch),
   written there.
+- N5 writes the marks both engines read in a table's cells where the page
+  holds none, the cells' characters in an engine A block labelled a table
+  (one the punctuator never read): a comma between two characters, a full
+  stop before a cell boundary, the two title marks of a pair written in
+  two gaps of one row, a dash in an empty cell, the marks either side of a
+  cell's line break, each line's marks on its side of a space the page
+  holds where engine A breaks the line; in the rows phase 3 moved to the
+  page before, also where the rule under the continuation's first row
+  stands between the two rows an edit touches.  Left: the same marks in
+  running text, on a line that merely holds a pipe, and in a page table
+  whose characters lie in a punctuated text block; a gap where the engines
+  differ (no doubt); a bracket whose partner is not written, two brackets
+  with a cell boundary between them, and the two about a gap between them
+  that is not written where engine A reads brackets there (two titles
+  would read as one); a star, a character a renderer reads as markup, one
+  that prints nothing; a gap beside a note marker; a gap where the page
+  holds a mark or a model answer wrote; cell boundaries that are not the
+  engines' one to one; a page punctuated whole, and the one table of a
+  page rebuilt from its crop (the seal's record).  The marks the rule found
+  and could not write - on the page, or in moved rows whose host row has
+  changed - are one `run-no-place` doubt a page, with their count; an edit
+  whose cell marks were all withheld is N1's.
 - N2 writes a whole line of Western text both engines read between two
   paragraphs, one engine with emphasis markers in it.
 - N3 rewrites `）（` as the engines' `（1522-66）`.
@@ -43,6 +65,7 @@ import contextlib
 import io
 import json
 from pathlib import Path
+import re
 import sys
 import tempfile
 from typing import Any
@@ -155,6 +178,32 @@ def make_spec() -> dict[int, dict[str, Any]]:
                                 "boundingBox": [0.1, 0.9, 0.5, 0.03], "blockLabel": "table"}]
     tail = b_form(paragraphs(spec[18])[-1][-4:])
     spec[18].setdefault("bEdits", []).append((tail, tail + "\n南安 嘉靖3"))
+    # N5: a table of scan 9 whose cells the page holds without the marks both
+    # engines read (engine A the HTML table, engine B its rows as lines); in
+    # its last row the engines differ on a mark, and read the title's opening
+    # bracket alike but not its closing one.  The same comma in running text.
+    spec[9]["extraSealed"] = ["| 府 | 事由 | 出處 |\n| --- | --- | --- |\n| 贛州 | 城砌以石高尺 | 康熙上猶縣志 |\n"
+                              "| 汀州 | 平亂建鎮 | 明史 |"]
+    spec[9]["extraBlocks"] = [{"text": "<table><tr><td>府</td><td>事由</td><td>出處</td></tr><tr><td>贛州</td>"
+                                       "<td>城砌以石，高18尺。</td><td>康熙《上猶縣志》3/2a-b。</td></tr><tr><td>汀州</td>"
+                                       "<td>平亂，建鎮</td><td>《明史》</td></tr></table>",
+                               "boundingBox": [0.1, 0.9, 0.5, 0.05], "blockLabel": "table"}]
+    tail = b_form(paragraphs(spec[9])[-1][-4:])
+    spec[9].setdefault("bEdits", []).append(
+        (tail, tail + "\n府 事由 出處\n贛州 城砌以石，高18尺。 康熙《上猶縣志》3/2a-b。\n汀州 平亂；建鎮 《明史"))
+    insert(spec, 9, 0, "，", "，", None)
+    # N5 on rows moved: the last two rows of scan 14's table are scan 15's,
+    # whose text before the move holds them as a table of its own, the rule
+    # under its first row.
+    spec[14]["extraSealed"] = ["| 府 | 事由 |\n| --- | --- |\n| 贛州 | 城周三里 |\n| 南安 | 城圮官修議出公帑 |\n| 汀州 | 動支河稅 |"]
+    part = "| 南安 | 城圮官修議出公帑 |\n| --- | --- |\n| 汀州 | 動支河稅 |"
+    spec[15]["tableStitch"] = {"before": fx.sealed_text(spec[15]) + "\n" + part + "\n",
+                               "continuation": {"head": {"page": 14, "table": 0}, "moved": part}}
+    spec[15]["extraBlocks"] = [{"text": "<table><tr><td>南安</td><td>城圮，官修。議出公帑。</td></tr><tr><td>《汀州》</td>"
+                                        "<td>動支河稅。</td></tr></table>",
+                                "boundingBox": [0.1, 0.9, 0.5, 0.05], "blockLabel": "table"}]
+    tail = b_form(paragraphs(spec[15])[-1][-4:])
+    spec[15].setdefault("bEdits", []).append((tail, tail + "\n南安 城圮，官修。議出公帑。\n《汀州》 動支河稅。"))
     # R1: a kept retry wrote 。 where the first answer and engine A have ，
     # (scan 14, the first paragraph's first column); a first answer that
     # differs from engine A (、 for ，) in the second paragraph.
@@ -199,6 +248,173 @@ def gap_of(page: str, a: str, b: str | None = None, edge: str = "") -> rn.Gap:
     return rn.Gap(1, 0, len(page), rn.tokens(page, "page"), rn.tokens(a, "a"), rn.tokens(b, "b"), a, b, 0, edge=edge)
 
 
+def run_page(text: str, a: str, b: str | None = None, record: dict[str, Any] | None = None,
+             mask: rn.Mask | None = None, labels: list[str] | None = None) -> tuple[str, list[dict[str, Any]], list[Any]]:
+    """One made-up page through the stage's page step (N1, N5, N3, N2): the
+    page's TEXT, engine A's body A - one layout block per line, labelled
+    `table` where the line holds a table's markup (a tag, a pipe) and
+    `text` otherwise, or by LABELS, one per line - and engine B's (A's when
+    None), the seal's RECORD (one that recorded doubts, none, unless given);
+    returns the text it leaves, the records and the doubts."""
+    b = a if b is None else b
+    lines = a.split("\n")
+    labels = labels or ["table" if re.search(r"<t[adr]|\|", line) else "text" for line in lines]
+    blocks = [{"text": line, "label": label, "index": k} for k, (line, label) in enumerate(zip(lines, labels))]
+    pd = rr.PageData(scan=1, text=text, entry={}, record={"doubts": [], **(record or {})}, a_body=a, a_blocks=blocks,
+                     b_text=b, b_body=b, band_text="", band_numbers=[])
+    setting = rn.Setting(None, {}, None, [1], {1: text}, mask or rn.Mask({}, {}))
+    plan = rr.Plan()
+    ledger = re_.Ledger({1: text})
+    records = ledger.apply("runs", rn._page_runs(setting, rn.PageRuns(pd, set()), plan))
+    return ledger.texts[1], records, plan.doubts
+
+
+TABLE = ("表一\n\n| 年代 | 規模 | 出處 |\n| --- | --- | --- |\n| 正德年間 | 城砌以石高尺馬道實以土 | 康熙上猶縣志 |\n"
+         "| 嘉靖五年 | 周圍三里門三 |  | 明世宗實錄 |\n")
+TABLE_A = ("表一\n<table><tr><td>年代</td><td>規模</td><td>出處</td></tr><tr><td>正德年間</td>"
+           "<td>城砌以石，高18尺，馬道實以土。</td><td>康熙《上猶縣志》3/2a-b。</td></tr><tr><td>嘉靖五年</td>"
+           "<td>周圍三里，門三。</td><td>—</td><td>《明世宗實錄》</td></tr></table>")
+TABLE_DONE = ("表一\n\n| 年代 | 規模 | 出處 |\n| --- | --- | --- |\n"
+              "| 正德年間 | 城砌以石，高18尺，馬道實以土。 | 康熙《上猶縣志》3/2a-b。 |\n"
+              "| 嘉靖五年 | 周圍三里，門三。 |  — | 《明世宗實錄》 |\n")
+
+
+def cell_checks() -> None:
+    """N5 on made-up pages: what it must write, and each look-alike it must
+    leave."""
+    text, records, doubts = run_page(TABLE, TABLE_A)
+    rules = [(r["rule"], r["after"]) for r in records]
+    check(text == TABLE_DONE, f"N5: the marks both engines read in a table's cells are written, the cell boundaries kept ({text!r})")
+    check([r["evidence"]["tier"] for r in records if r["rule"] == "N5"] == ["cell marks"] * 7
+          and ("N1", "18") in rules and ("N1", "》3/2a-b。 |\n| ") in rules and not doubts,
+          f"N5: a gap of marks alone is N5's, a gap whose marks N1 writes with its run stays N1's, no doubt ({rules})")
+    check(not any(r["evidence"].get("withheld") for r in records),
+          "N5: the two title marks written in two gaps of one row pair up (none withheld, N1's closing one too)")
+    check(run_page(text, TABLE_A)[1] == [], "N5: run again on its own output, nothing changes")
+    check(pp.CJK(text) == pp.CJK(TABLE), "N5: no CJK character changes")
+    # The look-alikes in running text and on a line that is no table.
+    check(run_page("城砌以石高尺\n", "城砌以石，高尺。")[0] == "城砌以石高尺\n",
+          "N5: in running text an empty gap where both engines read a mark stays (the punctuator's reading)")
+    check(run_page("甲乙丙丁 | 戊己庚辛\n", "甲乙，丙丁。 | 《戊己》庚辛")[0] == "甲乙丙丁 | 戊己庚辛\n",
+          "N5: a line that merely holds a pipe is no table")
+    row = "| 甲 | 乙 |\n| --- | --- |\n| 城砌以石高尺 | 馬道實以土 |\n"
+
+    def engines(cell: str, other: str = "馬道實以土") -> str:
+        return f"<table><tr><td>甲</td><td>乙</td></tr><tr><td>{cell}</td><td>{other}</td></tr></table>"
+
+    # The block's label decides, not the page's shape: the structure pass
+    # builds a page table from a punctuated text block too, and its empty
+    # gaps are the punctuator's.
+    passes = {"punctuationPasses": [{"block": 0, "label": "text", "ok": True, "range": [0, 12], "marks": 1}]}
+    text, records, doubts = run_page(row, engines("城砌以石，高尺"), record=passes, labels=["text"])
+    check(text == row and not records and not doubts,
+          "N5: a page table whose characters lie in an engine A text block (one the punctuator read) gets no edit")
+    check(run_page(row, engines("城砌以石，高尺"), record=passes)[0] == row.replace("以石高", "以石，高"),
+          "N5: the same page and engines, the block labelled a table: the comma is written")
+    # The seal's record: a model read the table's marks from the image.
+    text, records, _ = run_page(TABLE, TABLE_A, record={"doubts": [{"kind": "punctuation-whole-page", "detail": "x"}]})
+    check(not [r for r in records if r["rule"] == "N5"] and "城砌以石高18尺馬道實以土 |" in text,
+          "N5: a page punctuated whole keeps its cells' empty gaps (the runs are still N1's)")
+    text, records, _ = run_page(TABLE, TABLE_A, record={"tablesRebuilt": [{"block": 1, "outcome": "accepted"}]})
+    check(not [r for r in records if r["rule"] == "N5"] and "城砌以石高18尺馬道實以土 |" in text,
+          "N5: a table rebuilt from its crop (the seal names its block) keeps its cells' empty gaps")
+    two = "| 甲 | 乙 |\n| --- | --- |\n| 丙丁 | 戊己 |\n\n| 庚 | 辛 |\n| --- | --- |\n| 壬癸 | 子丑 |\n"
+    two_a = ("<table><tr><td>甲</td><td>乙</td></tr><tr><td>丙，丁</td><td>戊己</td></tr></table>\n"
+             "<table><tr><td>庚</td><td>辛</td></tr><tr><td>壬，癸</td><td>子丑</td></tr></table>")
+    text, records, _ = run_page(two, two_a, record={"tablesRebuilt": [{"block": 0, "outcome": "accepted"}]})
+    check(text == two.replace("壬癸", "壬，癸") and len(records) == 1,
+          f"N5: a rebuilt table is set aside per table; the page's other table gets its marks ({text!r})")
+    check(rn.unread_marks({"doubts": []}) and rn.unread_marks({"tablesRebuilt": [{"outcome": "refused"}], "doubts": [{"kind": "table-rebuild"}]})
+          and not rn.unread_marks({}) and not rn.unread_marks({"tablesRebuilt": []})
+          and rn.unread_marks({"punctuationPasses": [{"block": 0, "ok": True}]}),
+          "unread_marks: a seal with no doubts key is an older one, taken as read unless it records block passes")
+    refused = {"tablesRebuilt": [{"block": 0, "from": "nominated", "outcome": "refused"}], **passes}
+    check([r["rule"] for r in run_page(TABLE, TABLE_A, record={"tablesRebuilt": [{"block": 1, "outcome": "refused"}]})[1]].count("N5") == 7
+          and run_page(row, engines("城砌以石，高尺"), record=refused, labels=["text"])[0] == row,
+          "N5: a refused rebuild does not switch the rule off for a table block; a nominated text block kept its pass")
+    # Engines that differ, a star, a note marker, a mark of the page, an answer.
+    text, records, doubts = run_page(row, engines("城砌以石，高尺"), engines("城砌以石；高尺"))
+    check(text == row and not doubts, "N5: a gap where the engines read different marks is left, with no doubt")
+    text, records, doubts = run_page(row, engines("城砌以石*高尺"))
+    check(text == row and not doubts, "N5: a star both engines read (a table's note sign) is not written")
+    for cell in ("城砌以石~高尺", "城砌以石[高]尺", "城砌以石<高尺", "城砌以石\\高尺", "城砌以石 高尺", "城砌以石​高尺"):
+        text, records, doubts = run_page(row, engines(cell))
+        check(text == row and not doubts, f"N5: a character a renderer reads as markup, or one that prints nothing, is not written ({cell!r})")
+    text, records, doubts = run_page(row, engines("城砌以石①，高尺"))
+    check(text == row, "N5: a gap that holds a note marker is not written")
+    marked = row.replace("以石高", "以石、高")
+    check(run_page(marked, engines("城砌以石，高尺"))[0] == marked, "N5: a gap where the page holds a mark of its own is left")
+    at = row.index("高尺")
+    mask = rn.Mask({1: [False] * len(row)}, {1: [at]})
+    check(run_page(row, engines("城砌以石，高尺"), mask=mask)[0] == row, "N5: a gap where a model answer took text away is left")
+    text, records, doubts = run_page(row, engines("城砌以石，高尺", "《馬道實以土"))
+    check(text == row.replace("以石高", "以石，高") and len(records) == 1
+          and [(d[0], d[3].get("marks"), d[3].get("withheld")) for d in doubts] == [("run-no-place", 1, 1)],
+          f"N5: a bracket with no partner on its row is withheld, the other marks written, the page's one doubt counts it ({text!r})")
+    # Cell boundaries that are not the engines' one to one.
+    text, records, doubts = run_page(row, "<table><tr><td>甲</td><td>乙</td></tr><tr><td>城砌以石，高尺。</td><td>—</td>"
+                                          "<td>《馬道實以土》</td></tr></table>")
+    check(text == row.replace("以石高", "以石，高")
+          and [(d[0], d[3].get("marks"), d[3].get("gaps"), d[3].get("withheld")) for d in doubts] == [("run-no-place", 4, 1, 1)],
+          f"N5: where the page's cell boundaries are not the engines' one to one, the gap across them is left, its three marks "
+          f"counted with the closing bracket withheld after it ({text!r})")
+    # An HTML table, a cell's line break.
+    html = "<table>\n<tr>\n<td>治世餘聞<br>繼事紀聞</td>\n<td>城漸圮巡撫酌議</td>\n</tr>\n</table>\n"
+    text, records, _ = run_page(html, "<table><tr><td>《治世餘聞》\\n《繼事紀聞》</td><td>城漸圮，巡撫酌議。</td></tr></table>",
+                                "<table><tr><td>《治世餘聞》<br>《繼事紀聞》</td><td>城漸圮，巡撫酌議。</td></tr></table>")
+    check(text == "<table>\n<tr>\n<td>《治世餘聞》<br>《繼事紀聞》</td>\n<td>城漸圮，巡撫酌議。</td>\n</tr>\n</table>\n",
+          f"N5: an HTML table's cells get their marks, each side of a cell's line break ({text!r})")
+    text, records, _ = run_page(html, "<table><tr><td>《治世餘聞\\n繼事紀聞》</td><td>城漸圮巡撫酌議</td></tr></table>")
+    check("<td>《治世餘聞<br>繼事紀聞》</td>" in text, f"N5: a pair written about a cell's line break stands ({text!r})")
+    text, records, doubts = run_page(html, "<table><tr><td>《治世餘聞》《繼事紀聞》</td><td>城漸圮巡撫酌議</td></tr></table>")
+    check(text == html and [(d[0], d[3].get("marks")) for d in doubts] == [("run-no-place", 4)],
+          f"N5: marks whose side of the page's line break engine A does not give are not written, nor the brackets "
+          f"about them (two titles would read as one); the four are the page's one doubt ({text!r})")
+    # The bracket guard: two titles of one cell with a gap between them the
+    # engines differ in; a cell boundary between an opening and a closing one.
+    text, records, doubts = run_page("| 甲 | 乙 |\n| --- | --- |\n| 治世餘聞繼事紀聞 | 庚辛 |\n",
+                                     engines("《治世餘聞》《繼事紀聞》", "庚辛"), engines("《治世餘聞》、《繼事紀聞》", "庚辛"))
+    check("| 治世餘聞繼事紀聞 |" in text and not records and [(d[0], d[3].get("withheld")) for d in doubts] == [("run-no-place", 2)],
+          f"N5: the outer brackets of two titles are no pair where the gap between them is not written ({text!r})")
+    text, records, doubts = run_page("| 甲 | 乙 |\n| --- | --- |\n| 見明史卷三 | 及實錄載 |\n", engines("見《明史卷三", "及實錄》載"))
+    check("| 見明史卷三 | 及實錄載 |" in text and not records and [d[3].get("withheld") for d in doubts] == [2],
+          f"N5: an opening bracket in one cell and a closing one in the next are no pair ({text!r})")
+    html2 = "<table><tr><td>甲乙</td><td>丙丁</td></tr></table>\n"
+    check(run_page(html2, html2.replace("甲乙", "甲《乙").replace("丙丁", "丙》丁").strip())[0] == html2,
+          "N5: an HTML cell boundary on one line parts two brackets too")
+    # The page's space where engine A breaks the line in the cell.
+    text, records, _ = run_page("| 甲 | 乙 |\n| --- | --- |\n| 治世餘聞 繼事紀聞 | 庚辛 |\n",
+                                engines("《治世餘聞》\\n《繼事紀聞》", "庚辛"), engines("《治世餘聞》<br>《繼事紀聞》", "庚辛"))
+    check("| 《治世餘聞》 《繼事紀聞》 |" in text,
+          f"N5: where the page's cell holds a space and engine A breaks the line, each line's marks go on its side ({text!r})")
+    text, records, doubts = run_page("| 甲 | 乙 |\n| --- | --- |\n| 治世餘聞 繼事紀聞 | 庚辛 |\n",
+                                     engines("《治世餘聞》\\n——\\n《繼事紀聞》", "庚辛"), engines("《治世餘聞》<br>——<br>《繼事紀聞》", "庚辛"))
+    check("| 治世餘聞 繼事紀聞 |" in text and [d[3].get("marks") for d in doubts] == [5],
+          f"N5: a line of marks between them has no side of the page's space: the stretch is left, its marks counted ({text!r})")
+    # N5 names the edit for the marks N1 leaves; with every one withheld it is N1's.
+    text, records, _ = run_page("<table>\n<tr>\n<td>丙丁<br>戊己</td>\n</tr>\n</table>\n", "<table><tr><td>丙丁》\\nAD戊己</td></tr></table>",
+                                "<table><tr><td>丙丁》<br>AD戊己</td></tr></table>")
+    check("<td>丙丁<br>AD戊己</td>" in text and [(r["rule"], r["evidence"]["tier"], r["evidence"].get("withheld")) for r in records]
+          == [("N1", "T2", ["》"])],
+          f"N5: an edit whose cell marks were all withheld is N1's, its run written ({text!r})")
+    # The table's edge: what stands before the table is running text.
+    text, records, _ = run_page("表一城池\n\n| 甲乙 | 丙丁 |\n| --- | --- |\n| 戊己 | 庚辛 |\n",
+                                "表一城池。\n<table><tr><td>《甲乙》</td><td>丙丁</td></tr><tr><td>戊己</td><td>庚辛</td></tr></table>")
+    check(text.startswith("表一城池\n\n| 《甲乙》 | 丙丁 |"),
+          f"N5: in the gap that enters a table, the cell's mark is written and the line before keeps its end ({text!r})")
+    # stretches() on a made-up gap: the offsets of N5's marks, the brackets listed.
+    gap = gap_of(" | ", "。</td><td>《")
+    gap.tables, gap.bare = [(-1, 99)], (True, True)
+    check(rn.weave(gap)[0] == "。 | 《" and gap.cells == [0, 4] and gap.wrote == [4],
+          "N5: a stretch of marks alone in a table is written, its marks listed, its bracket listed for the pairing guard")
+    gap = gap_of(" | ", "。</td><td>《")
+    gap.tables = [(-1, 99)]
+    check(rn.weave(gap)[0] == " | " and gap.cells == [] and not gap.cell_lost,
+          "N5: a stretch beside no character of a block the punctuator never read is N1's alone, which leaves marks with no run")
+    check(rn.table_spans("甲 | 乙\n\n| 甲 | 乙 |\n| --- | --- |\n| 丙 | 丁 |\n") == [(7, 40)],
+          "table_spans: a Markdown table is its label row, rule and rows; a line with a pipe is none")
+
+
 def unit_checks() -> None:
     """The stage's functions on made-up gaps: what each must write, and the
     look-alike it must leave."""
@@ -238,6 +454,22 @@ def unit_checks() -> None:
                    rn.tokens("Chu, T. *Local Government*. Harvard, 1962.", "b"))
           and not rn.agree(rn.tokens("30</td><td>29", "a"), rn.tokens("3029", "b")),
           "two readings that cut the same characters into runs differently agree; two figures and one figure do not")
+    import _repair_inputs as ri
+    import _repair_joins as rj
+    frame = ri.parse_assembly("<!-- page_001 -->\n\n甲\n\n<!-- page_002 -->\n<!-- page_003 -->\n\n乙\n")
+    composed = frame.compose({2: "Tang Li-chung\n\n2002\n"})
+    check(composed == "<!-- page_001 -->\n\n甲\n\n<!-- page_002 -->\n\nTang Li-chung\n\n2002\n\n<!-- page_003 -->\n\n乙\n"
+          and frame.compose({}) == "<!-- page_001 -->\n\n甲\n\n<!-- page_002 -->\n<!-- page_003 -->\n\n乙\n"
+          and not rj.contract_problems(composed, {1: "start", 2: "paragraph", 3: "paragraph"}),
+          "compose: a text written into a page sealed empty gets a blank line each side; unchanged, the frame is byte for byte")
+    hyphenated = rn.tokens("eds., Challenging Authority: The Historical Study of Conten-tious Politics (London, 1998), pp. 91-104.", "b")
+    joined = rn.tokens("eds., Challenging Authority: The Historical Study of Contentious Politics (London, 1998), pp. 91-104.", "a")
+    check(not rn.agree(joined, hyphenated) and rn.nearly(joined, hyphenated)
+          and rn.nearly(rn.tokens("'Brigand Region' and 'District':", "a"), rn.tokens("\u2018Brigand Region\u2019 and \u2018District\u2019:", "b"))
+          and not rn.nearly(joined, rn.tokens("eds., Challenging Authority: The Historical Study of Contentious Politic (London, 1998), pp. 91-104.", "b"))
+          and not rn.nearly(joined, rn.tokens("eds., Challenging Authority: The Historical Study of Contentious Politics (London, 1998), pp. 91104.", "b"))
+          and not rn.nearly(rn.tokens("1997", "a"), rn.tokens("", "b")),
+          "nearly: a word hyphenated by one engine, curly and straight apostrophes; not a letter less, not a hyphen between figures, not a reading of nothing")
     text, brackets = rn.written(rn.tokens('Skinner, "Introduction," in Leong, Migration (Stanford: Press, 1997), pp. 1-18.', "a"))
     check(text == 'Skinner, "Introduction," in Leong, Migration (Stanford: Press, 1997), pp. 1-18.',
           f"written: Western text keeps its spaces and its ASCII marks ({text!r})")
@@ -266,6 +498,7 @@ def page_text(out: Path, scan: int) -> str:
 
 def main() -> int:
     unit_checks()
+    cell_checks()
     with tempfile.TemporaryDirectory() as tmp:
         tmp = Path(tmp)
         spec = make_spec()
@@ -275,7 +508,7 @@ def main() -> int:
         report = json.loads((out / "repair-report.json").read_text(encoding="utf-8"))
         check(status == 0 and report["checks"]["logReplay"]["passed"],
               f"the run exits 0 and its log replays to its output (exit {status})")
-        check(report["stages"]["runs"]["status"] == "ran" and report["stages"]["runs"]["rules"] == ["N4", "R1", "N1", "N3", "N2"],
+        check(report["stages"]["runs"]["status"] == "ran" and report["stages"]["runs"]["rules"] == ["N4", "R1", "N1", "N5", "N3", "N2"],
               "the runs stage ran and names its rules")
         records = re_.read_log((out / "repair-log.jsonl").read_text(encoding="utf-8").splitlines())
         by_rule = {}
@@ -300,7 +533,7 @@ def main() -> int:
         check(len(n1) == 5 and sorted(r["evidence"]["tier"] for r in n1) == ["T1", "T1", "T2", "T2", "T2"],
               f"N1: five edits on scan 6, two T1 and three T2 ({[r['evidence']['tier'] for r in n1]})")
         check(all(pp.CJK(page_text(out, s)) == pp.CJK(book.joinpath('proofread', f'page-{s:04d}.md').read_text(encoding='utf-8'))
-                  for s in (6, 8, 10, 12, 14, 17, 18)), "no CJK character changes on any page")
+                  for s in (6, 8, 9, 10, 12, 14, 15, 17, 18)), "no CJK character changes on any page")
 
         p8 = page_text(out, 8)
         check("1989" not in p8 and "1980" not in p8, "left alone: a figure the engines read differently")
@@ -331,7 +564,26 @@ def main() -> int:
               "N3: `）（` becomes the engines' `（1522-66）`")
         check("| 贛州 | 1496 | 弘治9 |" in p12, f"N1: a table row's empty cell and short cell get their figures ({p12.splitlines()[-1]!r})")
 
+        p9 = page_text(out, 9)
+        n5 = [r for r in by_rule.get("N5", []) if r["page"] == 9]
+        check("| 贛州 | 城砌以石，高18尺。 | 康熙《上猶縣志》3/2a-b。 |" in p9 and sorted(r["after"] for r in n5) == sorted(["，", "。 | ", "《"]),
+              f"N5: a table row's cells get the marks both engines read, the title marks as a pair ({p9.splitlines()[-2]!r})")
+        check(not any(r["evidence"].get("withheld") for r in records if r["page"] == 9)
+              and sum(1 for r in by_rule.get("N1", []) if r["page"] == 9) == 2,
+              "N5: the closing title mark N1 writes with its figure finds the opening one N5 wrote")
+        check("| 汀州 | 平亂建鎮 | 明史 |" in p9
+              and [(d["kind"], d.get("marks"), d.get("withheld")) for d in doubts if d["page"] == 9] == [("run-no-place", 1, 1)],
+              "N5: marks the engines read differently are not written, with no doubt; the bracket with no partner is "
+              "withheld and is the page's one doubt")
+        text9 = paragraphs(spec[9])[0]
+        check(text9[1:5] in p9, "N5: the same comma both engines read in running text is not written")
         p14 = page_text(out, 14)
+        moved = [r for r in by_rule.get("N5", []) if r["page"] == 14]
+        check("| 南安 | 城圮，官修。議出公帑。 |\n| 《汀州》 | 動支河稅。 |" in p14
+              and len(moved) == 6 and all(r["evidence"].get("movedFrom") == 15 for r in moved)
+              and "城圮" not in page_text(out, 15),
+              f"N5: the marks of rows moved to the page before are written there, either side of the rule the move dropped "
+              f"({p14.splitlines()[-2:]!r})")
         first = paragraphs(spec[14])[0]
         check(first[8:16] in p14 and first[8:15] + "。" not in p14 and any(r["page"] == 14 and r["rule"] == "R1" for r in records),
               "R1: the kept retry's 。 becomes the first answer's ， where engine A has it")
@@ -343,6 +595,20 @@ def main() -> int:
         report = json.loads((tmp / "off" / "repair-report.json").read_text(encoding="utf-8"))
         check(status == 0 and report["stages"]["runs"]["status"] == "off (--no-runs)" and report["counts"]["edits"] == 0,
               "--no-runs switches the stage off")
+
+        # The rows moved to scan 14, one of them changed there: the marks of
+        # that row find no place, and are the page's one doubt.
+        spec_moved = make_spec()
+        spec_moved[14]["extraSealed"] = [spec_moved[14]["extraSealed"][0].replace("| 汀州 | 動支河稅 |", "| 汀州 | 動支河稅銀 |")]
+        book_moved = fx.write_book(tmp / "book-moved", spec_moved)
+        status = run(str(book_moved), "--output", str(tmp / "out-moved"), "--no-model", *OTHER_STAGES_OFF)
+        doubts_moved = json.loads((tmp / "out-moved" / "doubts.json").read_text(encoding="utf-8"))
+        p14 = page_text(tmp / "out-moved", 14)
+        moved = [(d["kind"], d.get("movedTo"), d.get("marks"), d.get("gaps")) for d in doubts_moved if d["page"] == 15]
+        check(status == 0 and "| 南安 | 城圮，官修。議出公帑 |\n| 汀州 | 動支河稅銀 |" in p14 and moved == [("run-no-place", 14, 4, 3)],
+              f"N5: marks of a moved row that no longer stands on the host unchanged are not written (the full stop before "
+              f"the row goes with the bracket after it: one edit, all or none), and are one doubt of the page they were "
+              f"read on, with their count ({moved}, {p14.splitlines()[-2:]!r})")
 
         # N4 on its own: a ledger holding an S11 record the engines contradict.
         spec4 = n4_spec()

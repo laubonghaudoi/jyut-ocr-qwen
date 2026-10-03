@@ -71,7 +71,24 @@ Contents (stage `contents`), in passes on the text the pass before leaves:
   engine A did not read (or read as its figure's mark) dropped; the group
   lines as headings, the run suffix apart from the rest; the contents title
   as a heading; entries that make a Markdown list tight, the others a blank
-  line apart.  An entry whose number no source read is a question (Q-P), and
+  line apart.  An engine's figure is the entry's only where it stands alone
+  on its line or on the entry's own line: one that ends a line after other
+  print (leaders, the title before) is that line's page number, and what an
+  engine read on the line before is not read "before the title"
+  (entry_gap); and the one figure an engine read between the two titles
+  that is the very figure ending the line above on the page (its page
+  number) is that line's, read on a line of its own or with no line break
+  (read_numbers).  An engine not placed at the title is no evidence: the
+  marks the page holds there stay.  Where a bracket engine A read opens the
+  line, or figures engine A read follow the first, the head is the entry's
+  own enumerator and no number is written; a head with no number written
+  keeps its figures and letters (print, whatever engine A read) - but a
+  figure at a line's head that both engines read as the page number ending
+  the line before goes to that line's end, where the entry above ends with
+  its leaders and no figure.  Emphasis markers that wrap a whole entry go
+  together where engine A wrote none; emphasis around the number alone goes
+  with the number's old form; any other stay.
+  An entry whose number no source read is a question (Q-P), and
   so is one read without the mark the entries on either side carry: each
   carries the mark its group numbers with, where every number of the group
   written with a mark carries the same one (two at least, none a colon) -
@@ -111,7 +128,7 @@ from collections import Counter
 from dataclasses import dataclass, field
 import difflib
 import re
-from typing import Any, Callable, Mapping, Sequence
+from typing import Any, Callable, Mapping, NamedTuple, Sequence
 
 import proofread_pages as pp
 import _book_lint as lint
@@ -123,13 +140,38 @@ import _repair_rules as rr
 
 HEADING = re.compile(r"^(?P<indent> {0,3})(?P<marks>#{1,6})[ \t]+")
 LIST_ITEM = re.compile(r"^[ \t]*(?:[-*+]|\d+[.)])[ \t]+\S")
-# A contents line's markup and leading number: a bullet, a heading marker, a
-# stray bracket before the figure, the figure and the mark after it.
-ENTRY_LEAD = re.compile(r"^(?P<markup>[ \t]*(?:[-*+][ \t]+)?(?:#{1,6}[ \t]+)?)(?P<pre>[\[［(（]?[ \t]*)"
-                        r"(?:(?P<digits>[0-9０-９]{1,3})[ \t]*(?P<mark>[.．,，。、])?)?")
+# A contents line's markup and leading number: a bullet, a heading marker,
+# the emphasis run that may open the number (`**1**`), a stray bracket
+# before the figure, the figure and the mark after it.  A figure that runs
+# on into another - a year, or a second figure joined to it by one mark
+# (1.1, 2-3) - is part of a longer enumerator, no number.
+ENTRY_LEAD = re.compile(r"^(?P<markup>[ \t]*(?:[-*+][ \t]+)?(?:#{1,6}[ \t]+)?)(?:\*{1,3}|_{1,3})?(?P<pre>[\[［(（]?[ \t]*)"
+                        r"(?:(?P<digits>[0-9０-９]{1,3})(?![0-9０-９]|[^\s0-9０-９㐀-鿿][0-9０-９])"
+                        r"[ \t]*(?P<mark>[.．,，。、])?)?")
 ENTRY_TRAIL = re.compile(r"[ \t]+(?P<digits>[0-9０-９]{1,3})[ \t]*$")
-# A figure at the end of an engine's gap, the mark after it and white space.
-GAP_FIGURE = re.compile(r"(?<![0-9０-９])(?P<digits>[0-9０-９]{1,3})[ \t]*(?P<mark>[.．,，、。])?\s*$")
+# A figure at the end of an engine's gap, the mark after it and white space;
+# not the last figure of a longer enumerator (the 1 that ends 1.1).
+GAP_FIGURE = re.compile(r"(?<![0-9０-９])(?<![0-9０-９][^\s0-9０-９])(?P<digits>[0-9０-９]{1,3})[ \t]*"
+                        r"(?P<mark>[.．,，、。])?\s*$")
+# What an engine writes on a line before a figure that is no print of the
+# line: white space, heading and list markers, one run of emphasis markers
+# (one to three, as Markdown has them: a longer run of underscores is an
+# engine's leaders), and the stray bracket ENTRY_LEAD allows before a figure.
+GAP_MARKUP = re.compile(r"(?:[ \t]|#{1,6}[ \t]|[-*+>][ \t])*(?:\*{1,3}|_{1,3})?[ \t]*[\[［(（]?[ \t]*")
+# The figure that ends a contents line on the page (its page number after
+# its leaders or its title), with the emphasis that may close the line.
+LINE_END_FIGURE = re.compile(r"(?<![0-9０-９])(?P<digits>[0-9０-９]{1,3})[ \t]*(?:\*{1,3}|_{1,3})?[ \t]*$")
+FIGURES = re.compile(r"[0-9０-９]+")
+# Emphasis markers, and a run of them.  S11 takes them off in pairs or not
+# at all: the run before the title with the same run ending the line and no
+# such marker between (one taken alone leaves its partner).
+EMPHASIS = frozenset("*_")
+EMPHASIS_RUN = re.compile(r"\*+|_+")
+# An opening mark and the mark that closes it; of these, the quotes that
+# may wrap a whole title (S11 takes such a pair off together).
+CLOSERS = {"“": "”", "「": "」", "『": "』", "‘": "’", "（": "）", "(": ")", "［": "］", "[": "]", "《": "》",
+           "〈": "〉", "【": "】", "〔": "〕", "〖": "〗", "｛": "｝", "«": "»", "‹": "›", "〝": "〞"}
+QUOTES = frozenset("“「『‘")
 # Marks that open what follows them: a split point goes before them.
 OPENERS = frozenset("「『（(《〈【“‘[［")
 # An enumerator opening a heading (一 導言, （二）, 3.).
@@ -407,24 +449,32 @@ class PageReading:
         """The figure an engine read just before sealed character K, by the
         alignment; where K is not aligned to it, just before CHARS (folded
         CJK) found in its page stream.  Its value and the mark after it."""
+        found = self.gap_before(k, chars, engine)
+        return gap_figure(found[0]) if found else None
+
+    def gap_before(self, k: int, chars: str = "", engine: str = "a") -> tuple[str, bool] | None:
+        """What an engine read between sealed character K and the character
+        before it (its gap there), found as figure_at finds its figure, and
+        whether the gap opens the engine's text; None where the engine is
+        not aligned at K and CHARS does not place it: no evidence, which is
+        not the same as an engine that read nothing there."""
         j = (self.a_index(k) if engine == "a" else self.b_index(k)) if k >= 0 else None
         if j is None:
-            return self.figure_before(chars, engine) if chars else None
+            j = self.start_of(chars, engine) if chars else None
+        if j is None:
+            return None
         stream = self.align.a if engine == "a" else self.align.b
-        return gap_figure(stream.gaps[j])
+        return stream.gaps[j], j == 0
 
-    def figure_before(self, chars: str, engine: str = "a") -> tuple[int, str] | None:
-        """The figure an engine read just before CHARS (folded CJK), found in
-        its page stream once: the whole of CHARS, else its longest start
-        (three characters at least) that the stream holds only once."""
-        stream = self.align.a if engine == "a" else self.align.b
+    def start_of(self, chars: str, engine: str = "a") -> int | None:
+        """Where an engine's page stream holds CHARS (folded CJK) once: the
+        whole of CHARS, else its longest start (three characters at least)
+        that the stream holds only once."""
         hay = self._fold(engine)
         for size in range(len(chars), 2, -1):
             j = hay.find(chars[:size])
             if j >= 0:
-                if hay.find(chars[:size], j + 1) >= 0:
-                    return None
-                return gap_figure(stream.gaps[j])
+                return None if hay.find(chars[:size], j + 1) >= 0 else j
         return None
 
     def count(self, chars: str, engine: str, without: frozenset[str] | set[str] = frozenset()) -> int:
@@ -455,6 +505,63 @@ def gap_figure(gap: str) -> tuple[int, str] | None:
     if not match:
         return None
     return int(match.group("digits").translate(ra.FULLWIDTH_DIGITS)), (match.group("mark") or "")
+
+
+def markup_only(on_line: str) -> bool:
+    """Whether ON_LINE - what an engine wrote on a line before a figure - is
+    markup and white space alone (GAP_MARKUP), so that the figure stands
+    alone on its line; anything else there is print of that line (leaders,
+    a title) and the figure its page number.  One predicate for S11
+    (entry_gap) and N4 (_repair_runs._ends_line_before), so the two read a
+    gap alike."""
+    return GAP_MARKUP.fullmatch(on_line) is not None
+
+
+def line_end_figure(line: str) -> int | None:
+    """The figure that ends LINE of a contents page after print of its own
+    (its page number after its leaders or its title); None where no figure
+    ends it or only markup stands before the figure (a number alone on its
+    line is an entry's, not a page number)."""
+    match = LINE_END_FIGURE.search(line)
+    if not match or markup_only(line[:match.start()]):
+        return None
+    return int(match.group("digits").translate(ra.FULLWIDTH_DIGITS))
+
+
+class EntryGap(NamedTuple):
+    """An engine's gap before a contents entry's first character, read as
+    the entry's (entry_gap)."""
+    lead: str                       # what it read before the title besides the entry's figure and its mark
+    figure: tuple[int, str] | None  # the entry's figure and the mark after it
+    side: str                       # all it read on the entry's side of the gap
+    before: str | None              # the page number that ends the line before (its digits)
+
+
+def entry_gap(gap: str, first: bool) -> EntryGap:
+    """An engine's GAP before a contents entry's first character (FIRST: it
+    opens the engine's text), read as the entry's.
+
+    The gap runs from the last character of the line before, so it holds
+    that line's end too.  What stands before its first line break is the
+    line before's; and a figure that ends a line holding other print before
+    it - leaders, the title - is that line's own page number, never the
+    next entry's number (`……133⏎（一）…`: a contents that prints each
+    entry's page at the end of its line).  A figure alone on its line
+    (`12⏎title`: an entry's number printed above or before its title), or
+    on the entry's own line, is the entry's.  Measured 2026-10-02: the first
+    reading wrote 248 page numbers of the line before at entries' heads on
+    two horizontal books (223 and 25); the second is every number of a
+    vertical book's contents (its 158 edits unchanged)."""
+    own = 0 if first or "\n" not in gap else gap.index("\n") + 1
+    match = GAP_FIGURE.search(gap)
+    if match and "\n" in gap[match.end("digits"):]:
+        on_line = gap[:match.start()].rsplit("\n", 1)[-1]
+        if match.start() < own or not markup_only(on_line):
+            return EntryGap("", None, "", match.group("digits"))
+    if not match:
+        return EntryGap(gap[own:], None, gap[own:], None)
+    figure = int(match.group("digits").translate(ra.FULLWIDTH_DIGITS)), (match.group("mark") or "")
+    return EntryGap(gap[own:match.start()], figure, gap[own:], None)
 
 
 class Readings:
@@ -630,11 +737,14 @@ def contents_map(book: Any, model: Mapping[str, Any], texts: Mapping[int, str], 
 
 
 def read_numbers(contents: Contents, texts: Mapping[int, str], readings: Readings) -> None:
-    """Each entry's number as the page, engine A and engine B read it; the
-    contents-numbering gate; each entry's number."""
+    """Each entry's number as the page, engine A and engine B read it (an
+    engine's figure only where it is the entry's: entry_gap, and not the
+    page number that ends the line above); the contents-numbering gate;
+    each entry's number."""
     agree = total = 0
     for row in contents.entries():
-        line = texts[row.page].split("\n")[row.line - 1]
+        lines = texts[row.page].split("\n")
+        line = lines[row.line - 1]
         match = ENTRY_LEAD.match(line)
         if match and match.group("digits"):
             row.numbers["page"] = (int(match.group("digits").translate(ra.FULLWIDTH_DIGITS)), match.group("mark") or "")
@@ -647,10 +757,20 @@ def read_numbers(contents: Contents, texts: Mapping[int, str], readings: Reading
         ks = reading.chars_in(spans.start, spans.end)
         first = ks[0] if ks else -1
         key = folded(row.chars)
+        # The figure the page prints at the end of the line above (that
+        # entry's page number, after its leaders or its title).  An engine
+        # that read one figure between the two titles, and that one, read
+        # that page number - on a line of its own with the leaders lost, or
+        # with no line break before this title - not this entry's number.
+        # Two figures there (`……2⏎2 title`) are the page number and then
+        # the entry's own.
+        above = next((lines[n] for n in range(row.line - 2, -1, -1) if lines[n].strip()), "")
+        held = line_end_figure(above)
         for engine, name in (("a", "engineA"), ("b", "engineB")):
-            found = reading.figure_at(first, key, engine)
-            if found:
-                row.numbers[name] = found
+            found = reading.gap_before(first, key, engine)
+            figure = entry_gap(*found).figure if found else None
+            if figure and not (figure[0] == held and len(FIGURES.findall(found[0])) == 1):
+                row.numbers[name] = figure
         values = {v for v, _ in row.numbers.values()}
         if values:
             total += 1
@@ -1358,60 +1478,135 @@ def unread_marks_before(reading: PageReading, lo: int, hi: int) -> str:
     return marks if not any(c in read for c in marks) else ""
 
 
-def entry_line(reading: PageReading, row: Row, line: rr.Line) -> tuple[str, list[dict[str, Any]]]:
-    """S11: a contents entry's line as rebuilt, and what it leaves open."""
+def entry_line(reading: PageReading, row: Row, line: rr.Line) -> tuple[str, list[dict[str, Any]], tuple[str, str] | None]:
+    """S11: a contents entry's line as rebuilt, what it leaves open, and -
+    where the figure at its head is the line before's page number - that
+    figure and the line without it (s11 moves it where the line before can
+    take it).
+
+    Engine A's evidence is its gap before the title read as the entry's
+    (entry_gap); an engine not placed at the title is no evidence, and what
+    the page holds there then stays.  The number is written before the
+    title only where the line's head is a number's place: not where a
+    bracket engine A read opens it (`（1）`, `（一）`: the entry's own
+    enumerator), nor where it holds further figures engine A read (`3
+    1949年…`).  There, and where no number is written, the head stays as
+    the page holds it - its figures and letters too, print whatever engine
+    A read, and every mark where engine A missed one of those - less the
+    marks engine A did not read; an opening bracket or quote engine A did
+    not read stays too where the line holds its partner (dropped, it would
+    leave the partner alone), but for the quotes that wrap the whole title.
+    Emphasis markers that wrap the whole entry go where engine A wrote
+    none, both of them; a run with no partner at the line's end, or with
+    one inside the line (two spans), stays; emphasis closed inside the head
+    around the number alone goes with the number's old form."""
     text = line.text
     match = ENTRY_LEAD.match(text)
     ks = reading.chars_in(line.start, line.end)
     if not ks:
-        return text, []
+        return text, [], None
     title_at = reading.s.offsets[ks[0]] - line.start
-    lead_end = match.end() if match else 0
-    if lead_end > title_at:
-        lead_end = title_at
-    stray = text[lead_end:title_at]
+    markup_end = min(match.end("markup"), title_at)
+    lead_size = min(match.end(), title_at) - markup_end
+    head = text[markup_end:title_at]
     body = text[title_at:]
     trail = ENTRY_TRAIL.search(body)
-    moved = None
     if trail and "pageAfter" in row.numbers and row.number == row.numbers["pageAfter"][0]:
-        moved = trail.group("digits")
         body = body[:trail.start()]
     body = body.rstrip()
-    a_gap = ""
-    j = reading.a_index(ks[0])
-    if j is not None:
-        a_gap = reading.align.a.gaps[j]
     # What engine A read before the title besides its figure and the mark
-    # after it (those are the number, written apart).
-    figure = GAP_FIGURE.search(a_gap)
-    a_lead = a_gap[:figure.start()] if figure else a_gap
-    kept = "".join(c for c in stray if not c.isspace() and not c.isdigit() and c in a_lead)
-    dropped = "".join(c for c in stray if not c.isspace() and not c.isdigit() and c not in a_lead)
-    closers = {"“": "”", "「": "」", "『": "』", "‘": "’"}
-    for opener in dropped:
-        closer = closers.get(opener)
-        if closer and body.endswith(closer):
-            jl = reading.a_index(ks[-1])
-            after_gap = reading.align.a.gaps[jl + 1] if jl is not None and jl + 1 < len(reading.align.a.gaps) else ""
-            if closer not in after_gap:
-                body = body[:-1]
-    open_items = []
+    # after it (those are the number, written apart), and all it read there.
+    found = reading.gap_before(ks[0], folded(row.chars))
+    a_gap = entry_gap(*found) if found else None
+    a_lead, a_side = (a_gap.lead, a_gap.side) if a_gap else (None, None)
+
+    def stays(c: str, read: str | None) -> bool:
+        if c in EMPHASIS or read is None or c in read:
+            return True
+        # An opening mark whose partner the line holds stays with it, but
+        # for the quotes that wrap the whole title (drop_closers).
+        closer = CLOSERS.get(c)
+        return bool(closer) and closer in body and not (c in QUOTES and body.endswith(closer))
+
+    # The first run of emphasis markers in the head, where the same run ends
+    # the line and no such marker stands between: the pair that wraps the
+    # whole entry.  A run with a partner inside the line (two spans, the
+    # number set in bold alone) is no wrap: both stay.
+    wrap = EMPHASIS_RUN.search(head)
+    if wrap and a_side is not None and wrap.group()[0] not in a_side and len(body) > len(wrap.group()) \
+            and body.endswith(wrap.group()) and wrap.group()[0] not in head[wrap.end():] \
+            and wrap.group()[0] not in body[:-len(wrap.group())]:
+        head = head[:wrap.start()] + head[wrap.end():]
+        body = body[:-len(wrap.group())].rstrip()
+        if wrap.start() < lead_size:
+            lead_size -= len(wrap.group())
+    stray = head[lead_size:]
     number = row.number
     sources = [name for name, (value, _) in row.numbers.items() if value == number] if number is not None else []
-    if number is None or not sources:
-        if number is not None:
+    bracket = match.group("pre").strip()
+    opened = bool(bracket) and stays(bracket, a_lead)
+    further = any(c.isdigit() and stays(c, a_lead) for c in stray)
+    open_items = []
+    if number is None or not sources or opened or further:
+        if number is not None and not sources:
             open_items.append({"why": f"no source read the number of entry {number} ({row.chars})"})
         # No number is written: what the page holds before the title that
-        # an engine read there, its figures too, stays.
-        kept = "".join(c for c in stray if not c.isspace() and (c.isdigit() or c in a_gap))
-        return kept + body, open_items
+        # an engine read there stays, and so do its letters and figures,
+        # which are print whatever engine A read; where it missed one of
+        # those, its silence on the marks beside it is no evidence either.
+        missed = a_side is not None and any(c.isalnum() and c not in a_side for c in head)
+        dropped = "" if missed else "".join(c for c in head if not c.isspace() and not c.isalnum()
+                                            and not stays(c, a_side))
+        kept = "".join(c for c in head if c not in dropped).lstrip() if dropped else head
+        body = drop_closers(reading, ks, body, dropped)
+        # The figure at the head that engine A - and engine B, where it is
+        # placed here - read as the page number ending the line before.
+        digits = match.group("digits")
+        carried = None
+        if digits and not bracket and not match.group("mark") and not further and a_gap and a_gap.before \
+                and a_gap.before.translate(ra.FULLWIDTH_DIGITS) == digits.translate(ra.FULLWIDTH_DIGITS):
+            b_found = reading.gap_before(ks[0], folded(row.chars), "b")
+            b_gap = entry_gap(*b_found) if b_found else None
+            if b_gap is None or (b_gap.before or "").translate(ra.FULLWIDTH_DIGITS) == \
+                    digits.translate(ra.FULLWIDTH_DIGITS):
+                carried = (digits, (kept[:kept.index(digits)] + kept[kept.index(digits) + len(digits):]).lstrip() + body)
+        return kept + body, open_items, carried
+    kept = "".join(c for c in stray if not c.isspace() and not c.isdigit() and stays(c, a_lead))
+    dropped = "".join(c for c in stray if not c.isspace() and not c.isdigit() and not stays(c, a_lead))
+    # Emphasis whose runs pair up inside the head (`**1**`: the number set
+    # in bold alone) goes with the number's old form; a run whose partner
+    # is in the title, or has none, stays.
+    kept = "".join(c for c in kept if c not in EMPHASIS or not paired_runs(head, c))
+    body = drop_closers(reading, ks, body, dropped)
     # The mark after the number: engine A's, else the page's own, else
     # engine B's - a figure read without its mark does not take the page's
     # mark away.
     mark = next((row.numbers[name][1] for name in ("engineA", "page", "engineB", "pageAfter")
                  if name in sources and row.numbers[name][1]), "")
     mark = mark.replace("．", ".")
-    return f"{number}{mark} {kept}{body}", open_items
+    return f"{number}{mark} {kept}{body}", open_items, None
+
+
+def paired_runs(head: str, marker: str) -> bool:
+    """Whether the runs of the emphasis MARKER in HEAD close one another
+    (`**1** `: two runs of the same length), so the emphasis wrapped what
+    stands between them alone."""
+    runs = re.findall(re.escape(marker) + "+", head)
+    return bool(runs) and len(runs) % 2 == 0 and all(len(a) == len(b) for a, b in zip(runs[::2], runs[1::2]))
+
+
+def drop_closers(reading: PageReading, ks: Sequence[int], body: str, dropped: str) -> str:
+    """BODY (an entry's title to its line's end) without the closing quote
+    that ends it, where its opening partner is among the marks DROPPED from
+    before the title and engine A read no such closer after the title."""
+    for opener in dropped:
+        closer = CLOSERS.get(opener) if opener in QUOTES else None
+        if closer and body.endswith(closer):
+            jl = reading.a_index(ks[-1])
+            after_gap = reading.align.a.gaps[jl + 1] if jl is not None and jl + 1 < len(reading.align.a.gaps) else ""
+            if closer not in after_gap:
+                body = body[:-1]
+    return body
 
 
 def s11(setting: Setting, contents: Contents, plan: rr.Plan) -> dict[int, str]:
@@ -1429,7 +1624,8 @@ def s11(setting: Setting, contents: Contents, plan: rr.Plan) -> dict[int, str]:
         rows = sorted((r for r in contents.rows if r.page == scan), key=lambda r: r.line)
         new_text = {}
         pending: list[dict[str, Any]] = []
-        for row in rows:
+        moved: dict[int, dict[str, str]] = {}
+        for k, row in enumerate(rows):
             line = lines[row.line - 1]
             body = ENTRY_LEAD.match(line.text)
             core = line.text[body.end("markup"):].strip() if body else line.text.strip()
@@ -1442,15 +1638,32 @@ def s11(setting: Setting, contents: Contents, plan: rr.Plan) -> dict[int, str]:
                 rest = line.text[cut:].strip()
                 new = "#" * level + " " + head + (" " + rest if rest else "")
             else:
-                new, open_items = entry_line(reading, row, line)
+                new, open_items, carried = entry_line(reading, row, line)
+                # A page number the page holds at the head of this line,
+                # which the engines read at the end of the line before, goes
+                # there: where that line is the entry just above (nothing but
+                # white space between them), ends with no figure and with no
+                # markup, and a mark of its own - its leaders - ends it.
+                above = rows[k - 1] if k else None
+                if carried and above is not None and above.kind == "entry" \
+                        and not text[lines[above.line - 1].end:line.start].strip():
+                    held = new_text[above.line]
+                    if held and not held[-1].isalnum() and not pp.CJK(held[-1]) and held[-1] not in "*_`>|" \
+                            and not held[-1].isspace():
+                        new_text[above.line] = held + carried[0]
+                        moved.setdefault(above.line, {})["fromTheLineAfter"] = carried[0]
+                        moved.setdefault(row.line, {})["toTheLineBefore"] = carried[0]
+                        new = carried[1]
                 for item in open_items:
                     pending.append({"row": row, **item})
                 marks_by_group.setdefault(row.group, []).append((row, new))
             new_text[row.line] = new
-            if new != line.text:
-                plan.edits.append(re_.Edit(scan, line.start, line.end, new, rule="S11", evidence={
+        for row in rows:
+            line = lines[row.line - 1]
+            if new_text[row.line] != line.text:
+                plan.edits.append(re_.Edit(scan, line.start, line.end, new_text[row.line], rule="S11", evidence={
                     "kind": row.kind, "numbers": {k: f"{v}{m}" for k, (v, m) in row.numbers.items()},
-                    "number": row.number, "place": row.place}))
+                    "number": row.number, "place": row.place, **moved.get(row.line, {})}))
         for one, two in zip(rows, rows[1:]):
             a, b = lines[one.line - 1], lines[two.line - 1]
             between = text[a.end:b.start]

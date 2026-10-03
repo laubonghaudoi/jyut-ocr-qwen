@@ -11,7 +11,8 @@ must repair and a look-alike it must leave:
 Contents (the made-up contents: two groups, each a run suffix and its
 subtitle, entries `n title`):
 - S11 rebuilds the contents: an entry whose bullet stands where its number
-  was gets the number engines A and B read; a number printed after the title
+  was gets the number engines A and B read (engine A on a line of its own
+  above the title); a number printed after the title
   goes before it; a mark before the title engine A did not read goes; the
   mark after a number the page holds stays where engine A read the figure
   without it; the mark engine A read after its figure, which the page holds
@@ -19,6 +20,23 @@ subtitle, entries `n title`):
   heading, the suffix apart from the rest; an entry whose number no source
   read is a question, and an entry with no unit in the body a
   `unit-not-in-scan` doubt.
+- S11 on a contents that prints each entry's page at the end of its line
+  after leaders (the look-alike): the figure both engines read at the end of
+  the line before is not the entry's number and is not written; the bracket
+  that opens an entry stays, read by engine A at the line's head, or not
+  read by it while the line holds its closing partner, or with engine A not
+  placed at the title (no evidence); the emphasis markers that
+  wrap an entry go together where engine A wrote none, and stay together
+  with engine A not placed, and a run with no partner at the line's end
+  stays; a figure the page holds at a line's head stays where no number is
+  written, and goes to the end of the line before where both engines read
+  it there; an enumerator of two figures (1.1) stays whole; the bullets
+  still go.
+- An engine's figure before an entry (entry_gap) is the entry's alone on its
+  line, at the head of the entry's line or straight before the title; not
+  where it ends a line after leaders or after the title before, on that
+  line or on a line of its own with its leaders; what stands before the
+  gap's first line break is not read "before the title".
 - S4 writes engine A's number over a glyph it did not read before a unit's
   title; a unit whose number engine A did not read is a question, and so is
   one whose heading holds, before the number, characters engine A read.
@@ -84,6 +102,7 @@ import contextlib
 import io
 import json
 from pathlib import Path
+import re
 import sys
 import tempfile
 from typing import Any
@@ -97,6 +116,7 @@ sys.path.insert(0, str(HERE.parent / "scripts"))
 import _repair_edits as re_  # noqa: E402
 import _repair_inputs as ri  # noqa: E402
 import _repair_rules as rr  # noqa: E402
+import _repair_runs as rn  # noqa: E402
 import _repair_structure as rs  # noqa: E402
 import repair_book  # noqa: E402
 
@@ -125,6 +145,9 @@ class Result:
 
     def rules(self, page: int) -> list[str]:
         return [r["rule"] for r in self.log if r["page"] == page]
+
+    def rules_on(self, rule: str) -> list[int]:
+        return [r["page"] for r in self.log if r["rule"] == rule]
 
     def asked(self, page: int) -> list[str]:
         return [q["rule"] for q in self.questions if q["page"] == page]
@@ -225,6 +248,71 @@ def date_checks() -> None:
           "numeral groups that end at 月, a separator or a mark are a date")
 
 
+# --- an engine's figure before a contents entry --------------------------------------
+
+# The last figure of an engine's gap (the one GAP_FIGURE reads).
+GAP_DIGITS = re.compile(r"[0-9]{1,3}(?=[^0-9]*$)")
+
+
+def gap_checks() -> None:
+    cases = [
+        # The entry's: alone on its line (above the title), after the end of
+        # the line before, opening the engine's text, at the head of the
+        # entry's line, straight before the title, with its mark, after an
+        # engine's heading marker.
+        ("\n12\n", False, (12, ""), ""),
+        ("？\n12\n", False, (12, ""), ""),
+        ("12\n", True, (12, ""), ""),
+        ("\n12 ", False, (12, ""), ""),
+        ("15", False, (15, ""), ""),
+        ("\n3.\n", False, (3, "."), ""),
+        ("\n## 12\n", False, (12, ""), "## "),
+        # The line before's page number: after leaders, after the title with
+        # no leaders, with its leaders on a line of their own.
+        ("……133\n", False, None, ""),
+        ("……133  \n\n", False, None, ""),
+        (" 133\n", False, None, ""),
+        ("\n……133\n", False, None, ""),
+        # No figure of the entry's: the bracket that opens it, an enumerator
+        # of two figures, a year.
+        ("……133\n（", False, None, "（"),
+        ("……5\n1.1 ", False, None, "1.1 "),
+        ("……5\n1949", False, None, "1949"),
+        # Markup before a figure alone on its line - a bullet, a run of
+        # emphasis - is no print of the line; underscores written for the
+        # leaders are, and the figure after them is the line before's.
+        ("\n- 12\n", False, (12, ""), "- "),
+        ("- 12\n", True, (12, ""), "- "),
+        ("\n**12\n", False, (12, ""), "**"),
+        ("\n____12\n", False, None, ""),
+        ("____12\n", True, None, ""),
+    ]
+    wrong = [(gap, first, rs.entry_gap(gap, first)[:2]) for gap, first, figure, lead in cases
+             if rs.entry_gap(gap, first)[:2] != (lead, figure)]
+    check(not wrong, f"entry_gap: an engine's figure is the entry's alone on its line or on the entry's line, and "
+                     f"the line before's where it ends that line after other print ({wrong})")
+    before = [rs.entry_gap(gap, first).before for gap, first, _, _ in cases]
+    check(before == [None] * 7 + ["133"] * 4 + [None] * 3 + [None] * 3 + ["12"] * 2,
+          f"entry_gap: the page number that ends the line before is kept as that ({before})")
+    # N4 reads the same gaps with the same predicate (markup_only): where
+    # S11 takes a figure as the entry's, N4 never reads it at the end of the
+    # line before (it would undo S11's number); where the figure ends the
+    # line straight before the title and S11 reads it as the line before's,
+    # N4 reads it so too.
+    disagree = []
+    for gap, first, figure, _ in cases:
+        digits = GAP_DIGITS.search(gap)
+        if not digits:
+            continue
+        n4 = rn._ends_line_before(gap, digits.group(), first)
+        read = rs.entry_gap(gap, first)
+        if read.figure and n4:
+            disagree.append((gap, first, "S11 the entry's, N4 the line before's"))
+        if read.before and re.fullmatch(r".*[0-9][ \t]*\n[ \t#*>-]*", gap, re.S) and not n4:
+            disagree.append((gap, first, "S11 the line before's, N4 not"))
+    check(not disagree, f"entry_gap and N4's _ends_line_before read one gap alike ({disagree})")
+
+
 # --- contents ------------------------------------------------------------------------
 
 # A unit title long enough to match with two of its characters lost.
@@ -241,7 +329,9 @@ def contents_spec() -> dict[int, dict[str, Any]]:
     seal(spec, 2, "3 山居雜詠", "。山居雜詠")
     seal(spec, 2, "### 甲編 詩文", "甲編詩文")
     # An entry whose number no source read; an entry with no unit.
-    spec[2]["aEdits"] = [("4 江上聽雨", "江上聽雨")]
+    # Engine A read the first entry's number on a line of its own above its
+    # title (a vertical contents: the number printed over the title).
+    spec[2]["aEdits"] = [("4 江上聽雨", "江上聽雨"), ("1 春日遊記", "1\n春日遊記")]
     spec[2]["bEdits"] = [("4 江上聽雨", "江上聽雨")]
     seal(spec, 2, "4 江上聽雨", "江上聽雨")
     spec[3]["items"].append(("line", "4 竹林清話"))
@@ -365,6 +455,152 @@ def contents_checks(tmp: Path) -> None:
     rest = again(tmp, "contents", result)
     check(not rest, f"contents: the stages run again on their own output change nothing "
                     f"({[(e.page, e.rule) for e in rest]})")
+
+
+def bold_checks(tmp: Path) -> None:
+    """S11 on numbered entries sealed in bold: the number alone, the number
+    and its mark, the whole entry."""
+    spec = fx.make_spec()
+    seal(spec, 2, "1 春日遊記", "**1** 春日遊記")
+    seal(spec, 2, "2 秋夜讀書", "**2.** 秋夜讀書")
+    seal(spec, 2, "3 山居雜詠", "**3 山居雜詠**")
+    result = repair(tmp, spec, "bold")
+    lines = result.pages[2].split("\n")
+    check(result.status == 0 and "1 春日遊記" in lines,
+          f"S11: the emphasis around the number alone goes with the number's old form ({lines})")
+    check("2. 秋夜讀書" in lines,
+          "S11: the number's mark inside the emphasis is the page's mark, written after the number")
+    check("3 山居雜詠" in lines and "*" not in result.pages[2],
+          "S11: the emphasis that wraps a numbered entry, which engine A did not write, goes - both markers")
+    rest = again(tmp, "bold", result)
+    check(not rest, f"bold entries: the stages run again on their own output change nothing "
+                    f"({[(e.page, e.rule, e.after) for e in rest]})")
+
+
+# --- a contents with page numbers ----------------------------------------------------
+
+def paged_spec() -> dict[int, dict[str, Any]]:
+    """The made-up book with a contents of the other kind: no entry is
+    numbered, each line ends with leaders and the page its unit starts on,
+    and the engines read each line as printed - so the figure they read
+    before a title is the page number that ends the line before.  Four more
+    units (scans 6, 8, 10, 14) carry the look-alikes."""
+    spec = fx.make_spec()
+    for scan, title in ((19, "竹林清話"), (20, "漁舟唱晚")):
+        spec[3]["items"].append(("line", f"0 {title}"))
+        spec[scan]["items"].insert(1, ("heading", f"0 {title}", 3))
+    for scan, title, after in ((6, "晨光初照", "春日遊記"), (8, "雲水禪心", "秋夜讀書"), (10, "竹影清風", "山居雜詠"),
+                               (14, "雲外鐘聲", "晨鐘暮鼓")):
+        items = spec[2 if scan < 13 else 3]["items"]
+        at = next(i for i, item in enumerate(items) if item[0] == "line" and item[1].endswith(after))
+        items.insert(at + 1, ("line", f"0 {title}"))
+        spec[scan]["items"].insert(1, ("heading", f"0 {title}", 3))
+    for scan in spec:
+        items = spec[scan]["items"]
+        for i, item in enumerate(items):
+            if item[0] in ("line", "heading") and item[1][:1].isdigit():
+                items[i] = (item[0], item[1].split(" ", 1)[1], *item[2:])
+    page_of = {heading_of(spec, scan): scan for scan in spec if scan > 4 and any(
+        item[0] == "heading" for item in spec[scan]["items"])}
+    for scan in (2, 3):
+        items = spec[scan]["items"]
+        for i, item in enumerate(items):
+            if item[0] == "line":
+                items[i] = ("line", f"{item[1]}……{page_of[item[1]]}")
+
+    def reprint(scans: tuple[int, int], title: str, printed: str) -> None:
+        for scan in scans:
+            items = spec[scan]["items"]
+            for i, item in enumerate(items):
+                if item[0] in ("line", "heading") and item[1].startswith(title):
+                    items[i] = (item[0], printed + item[1][len(title):], *item[2:])
+    # An entry that opens with a bracket, as a list item after a plain one;
+    # an entry in a pair of emphasis markers whose first character engine A
+    # misread (it is not placed at the title); emphasis that ends inside
+    # the title.
+    reprint((2, 7), "秋夜讀書", "（乙）秋夜讀書")
+    reprint((2, 9), "山居雜詠", "（甲）山居雜詠")
+    reprint((2, 11), "江上聽雨", "「江上」聽雨")
+    reprint((3, 19), "竹林清話", "1.1 竹林清話")
+    seal(spec, 2, "春日遊記……5", "**春日**遊記……5")
+    seal(spec, 2, "（乙）秋夜讀書……7", "- （乙）秋夜讀書……7")
+    seal(spec, 2, "（甲）山居雜詠……9", "- （甲）山居雜詠……9")
+    seal(spec, 2, "「江上」聽雨……11", "**「江上」聽雨……11**")
+    # Two bold spans on one entry (the title's start and the page number);
+    # a head of a letter and its mark, and one of a bracket the old CLOSERS
+    # lacked (〔), both printed and misread by engine A.
+    seal(spec, 2, "晨光初照……6", "**晨光**初照……**6**")
+    reprint((2, 8), "雲水禪心", "A. 雲水禪心")
+    reprint((2, 10), "竹影清風", "〔一〕竹影清風")
+    # Engine A read no bracket before 乙 (its closing partner it read), no
+    # head before 雲水禪心, and 〔 as [.
+    spec[2]["aEdits"] = [("「江上」聽雨……11", "「汪上」聽雨……11"), ("（乙）秋夜讀書……7", "乙）秋夜讀書……7"),
+                        ("A. 雲水禪心……8", "雲水禪心……8"), ("〔一〕竹影清風……10", "[一〕竹影清風……10")]
+    # A bold entry; the page number of an entry sealed at the head of the
+    # next line; an entry printed with an enumerator of two figures; a
+    # figure at a line's head that no engine read at the end of the line
+    # before.
+    seal(spec, 3, "晨鐘暮鼓……13", "**晨鐘暮鼓……13**")
+    seal(spec, 3, "田園小記……15\n\n松下問答……18", "田園小記……\n\n15松下問答……18")
+    seal(spec, 3, "漁舟唱晚……20", "3 漁舟唱晚……20")
+    # Both engines read the first two entries on one line (the 13 ending
+    # the first stands straight before the second title), and the second
+    # entry's page number on a line of its own, its leaders lost (the 14
+    # stands alone on its line before the third title).
+    spec[3]["aEdits"] = [("晨鐘暮鼓……13", "晨鐘暮鼓……13 雲外鐘聲"), ("雲外鐘聲……14", "14")]
+    spec[3]["bEdits"] = [("晨鐘暮鼓……13\n雲外鐘聲……14\n", "晨鐘暮鼓……13 雲外鐘聲\n14\n")]
+    return spec
+
+
+def paged_checks(tmp: Path) -> None:
+    spec = paged_spec()
+    result = repair(tmp, spec, "paged")
+    check(result.status == 0 and result.report["checks"]["logReplay"]["passed"] is True,
+          f"paged contents: the run exits 0 and its log replays to its output (exit {result.status})")
+    check(result.report["gates"].get("M-6") is True and 2 in result.rules_on("S11"),
+          f"paged contents: the contents are found and rebuilt ({result.report['gates'].get('M-6')})")
+    first, second = result.pages[2].split("\n"), result.pages[3].split("\n")
+    check("（甲）山居雜詠……9" in first,
+          f"S11: the page number that ends the line before is not written as the entry's number, the bullet "
+          f"goes, and the bracket that opens the entry, read by engine A at the line's head, stays "
+          f"({[line for line in first if line.strip()]})")
+    check("（乙）秋夜讀書……7" in first,
+          "S11: an opening bracket engine A did not read stays where the line holds its closing partner")
+    check("**「江上」聽雨……11**" in first,
+          "S11: with engine A not placed at the title, the mark and the emphasis the page holds before it stay")
+    check("**春日**遊記……5" in first, "S11: emphasis with no partner at the line's end stays")
+    check("**晨光**初照……**6**" in first,
+          f"S11: two bold spans on one entry are no wrapping pair: both stay whole ({[line for line in first if '晨光' in line]})")
+    check("A. 雲水禪心……8" in first,
+          "S11: a letter at the head is print, and the mark beside it stays where engine A missed the letter")
+    check("〔一〕竹影清風……10" in first,
+          "S11: an opening 〔 engine A read as [ stays where the line holds its 〕")
+    check("晨鐘暮鼓……13" in second and "**" not in result.pages[3],
+          f"S11: the emphasis that wraps an entry, which engine A did not write, goes - both markers "
+          f"({[line for line in second if line.strip()]})")
+    check("雲外鐘聲……14" in second and "13 雲外鐘聲" not in result.pages[3],
+          "S11: the figure both engines read straight before a title with no line break, which ends the line "
+          "above on the page, is that line's page number and is not written")
+    received = next((r for r in result.log if r["rule"] == "S11" and r["after"] == "田園小記……15"), None)
+    check("田園小記……15" in second and "松下問答……18" in second and "14 田園小記" not in result.pages[3]
+          and received is not None and received["evidence"]["numbers"] == {},
+          f"S11: a figure at a line's head that both engines read at the end of the line before goes there; "
+          f"the 14 both engines read alone on its line above the title, which ends the line above on the page, "
+          f"is no source ({received and received['evidence']})")
+    check("3 漁舟唱晚……20" in second,
+          "S11: a figure the page holds at the head of a line stays where no number is written")
+    check("1.1 竹林清話……19" in second,
+          "S11: an enumerator of two figures is no number: it stays whole")
+    numbered = [r["after"] for r in result.log if r["rule"] == "S11" and r["evidence"].get("number") is not None]
+    check(not numbered, f"S11: no entry of a contents that numbers none gets a number ({numbered})")
+    written = [r["after"] for r in result.log if r["rule"] == "S11" and r["evidence"].get("kind") == "entry"]
+    check(written == ["（乙）秋夜讀書……7", "（甲）山居雜詠……9", "晨鐘暮鼓……13", "田園小記……15", "松下問答……18"]
+          and not result.rules_on("N4"),
+          f"S11: it writes nothing else on the entries, and the runs stage has nothing of it to undo "
+          f"({written}, N4 {result.rules_on('N4')})")
+    rest = again(tmp, "paged", result)
+    check(not rest, f"paged contents: the stages run again on their own output change nothing "
+                    f"({[(e.page, e.rule, e.after) for e in rest]})")
 
 
 # --- headings --------------------------------------------------------------------------
@@ -590,22 +826,31 @@ def gate_checks(tmp: Path) -> None:
     check(not [r for r in result.log if r["rule"] in ("S11", "S4")],
           f"with the gate failed, no number is written from a place "
           f"({[(r['page'], r['rule']) for r in result.log if r['rule'] in ('S11', 'S4')]})")
-    # No contents: the contents pages set as prose.
+    # No contents: the contents pages set as prose, but for a title leaf
+    # (scan 3) that prints the cover's three lines again.
     spec = fx.make_spec()
-    for scan in (2, 3):
-        spec[scan]["items"] = [("para", fx.paragraph(scan + 300, 90), False)]
+    spec[1]["items"] += [("line", "春山居士著"), ("line", "青山書局印行")]
+    spec[2]["items"] = [("para", fx.paragraph(302, 90), False)]
+    spec[3]["items"] = [("line", "青山文叢全編"), ("line", "春山居士著"), ("line", "青山書局印行")]
     seal(spec, 7, "### 2 秋夜讀書", "# 2 秋夜讀書")
     result = repair(tmp, spec, "no-contents")
     structural = [r for r in result.log if r["rule"] in ("S9", "S4", "S16", "S7", "S11", "S5", "S12")]
     check(not result.report["gates"].get("M-6") and not structural and not result.doubted("heading-kind-unknown"),
           f"a book with no contents (M-6 failed) gets no contents or level edit and no heading doubt "
           f"({[(r['page'], r['rule']) for r in structural]})")
+    refused = [d for d in result.doubts if d["kind"] == "gate-failed" and d.get("gate") == "M-6" and d.get("page") == 3]
+    check(len(refused) == 1 and "one other page" in refused[0]["detail"] and refused[0]["measured"]["pages"] == [3],
+          f"a list-like run M-6 refused as contents (the title leaf, every line mapped onto the cover) is a "
+          f"`gate-failed` doubt naming it ({[d['detail'] for d in result.doubts if d['kind'] == 'gate-failed']})")
 
 
 def main() -> int:
     date_checks()
+    gap_checks()
     with tempfile.TemporaryDirectory() as tmp:
         contents_checks(Path(tmp))
+        bold_checks(Path(tmp))
+        paged_checks(Path(tmp))
         units_checks(Path(tmp))
         headings_checks(Path(tmp))
         levels_checks(Path(tmp))

@@ -212,8 +212,9 @@ def joins_stage(context: Context) -> StageResult:
 
 def runs_stage(context: Context) -> StageResult:
     """Text runs both engines read that the page lacks, the marks of a
-    refused first answer engine A confirms, and the contents numbers S11
-    moved against both engines (_repair_runs N4, R1, N1, N3, N2); last, so
+    refused first answer engine A confirms, the marks both engines read in
+    a table's cells, and the contents numbers S11 moved against both
+    engines (_repair_runs N4, R1, N1, N5, N3, N2); last, so
     that no question sees a different text and every held answer is reused.
     N4 and R1 are applied before the rest is proposed."""
     plan = rn.runs(context.book, context.model, context.ledger, context.order(), context.apply, context.facts(),
@@ -264,7 +265,7 @@ STAGE_RULES = {
     "levels": ["S5", "S12"],
     "paragraphs": ["P4", "P7", "P1", "P2", "P6", "P5"],
     "joins": ["S", "T", "H", "L", "P-3", "J1", "J2", "J3", "J4", "P-1", "P-2", "P6"],
-    "runs": ["N4", "R1", "N1", "N3", "N2"],
+    "runs": ["N4", "R1", "N1", "N5", "N3", "N2"],
 }
 
 
@@ -383,13 +384,21 @@ def load_answers(output: Path) -> dict[str, dict[str, Any]]:
 
 
 def model_doubts(model: Mapping[str, Any], ledger: re_.Ledger) -> None:
-    """A `gate-failed` doubt for every gate the book failed, and a
-    `leaves-missing` doubt for every jump in the folio sequence."""
+    """A `gate-failed` doubt for every gate the book failed, one for every
+    run of list-like pages M-6 refused as contents on its characters or on
+    the count of pages its lines map onto (a contents lost there would
+    otherwise be lost in silence), and a `leaves-missing` doubt for every
+    jump in the folio sequence."""
     for name, gate in sorted((model.get("gates") or {}).items()):
         if not gate.get("passed"):
             measured = {k: v for k, v in gate.items() if k != "passed"}
             ledger.doubt("gate-failed", None, f"{name} failed on this book; the rules that need it stay silent",
                          gate=name, measured=measured)
+        for run in gate.get("rejected") or []:
+            where = f"scan {run['pages'][0]}" if len(run["pages"]) == 1 else f"scans {run['pages'][0]}-{run['pages'][-1]}"
+            ledger.doubt("gate-failed", run["pages"][0],
+                         f"{name} refused the list-like {where} as contents: {run['why']}; a contents there gets no "
+                         f"contents rule", gate=name, measured=run)
     for jump in (model.get("folio") or {}).get("jumps") or []:
         if jump.get("kind") == "leaves-missing":
             ledger.doubt("leaves-missing", jump["before"],

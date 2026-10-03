@@ -25,7 +25,8 @@ failed stays silent on that book and its sites become questions or doubts
 - M-5 dividers: the page that opens a run and prints its suffix in display
   type.
 - M-6 contents pages: a run of list-like pages whose lines map, in order,
-  onto the book's other lines.
+  onto the book's other lines - most of its lines, holding at least half
+  of its characters, onto more than one page.
 - M-7 engine B's stand-ins: its mark aliases (phase 3's mark_evidence /
   mark_aliases), and the glyphs it writes where engine A printed figures
   (not CJK numerals: those read the figure in the other script), dashes and
@@ -83,10 +84,12 @@ DISPLAY_RATIO = 1.5
 TITLE_LABELS = frozenset({"doc_title", "paragraph_title", "title", "figure_title"})
 # M-6: a list-like page has at least this many lines and a median line of at
 # most this many characters; a contents run maps at least this share of its
-# lines, each at this similarity.
+# lines, each at this similarity, and the lines it maps hold at least half
+# of its characters (learn_contents).
 CONTENTS_MINIMUM_LINES = 3
 CONTENTS_LINE_LENGTH = 30
 CONTENTS_SHARE = 0.6
+CONTENTS_TEXT_SHARE = 0.5
 CONTENTS_SIMILARITY = 0.9
 CONTENTS_LEADING_DROP = 3
 # M-7: engine B's glyph stands in for print engine A read as no character
@@ -722,7 +725,25 @@ def map_in_order(entries: Sequence[str], targets: Sequence[str]) -> list[tuple[i
 
 def learn_contents(texts: Mapping[int, str], runs: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     """M-6: runs of list-like pages whose lines map, in order, onto the lines
-    of the book's other pages."""
+    of the book's other pages.
+
+    A contents is made of its entries: the lines it maps hold most of its
+    text.  A page of the body with a title, a date line and a closing
+    formula between long paragraphs maps most of its LINES (onto the
+    contents that list it, onto other dates) and little of its text, and so
+    does a chapter's first page; such a run is no contents, and such a page
+    at the end of a run is dropped from it by its own character share, as a
+    page mapping too few lines is, before the run is judged (joined to the
+    contents, it would dilute the run's characters and lose the contents
+    whole).  And the entries of a contents stand on more than one page: a
+    run whose mapped lines all stand on one other page is that page printed
+    again (a cover and its title page).  A run of list-like pages refused
+    on its characters or on that count after the trimming is returned under
+    `rejected` (the repair tool records a doubt for it: a contents lost
+    here would otherwise be lost in silence).  Measured 2026-10-02 on three
+    books: the five contents runs map 0.82-0.96 of their characters, the 22
+    runs of body pages taken for contents 0.05-0.39, and a title page
+    mapped three of its five lines, all onto the cover."""
     lines = {scan: [(n, line) for n, line in enumerate(text.split("\n"), 1) if line_chars(line)]
              for scan, text in texts.items()}
     listlike = [scan for scan, rows in sorted(lines.items())
@@ -735,12 +756,14 @@ def learn_contents(texts: Mapping[int, str], runs: Sequence[Mapping[str, Any]]) 
         else:
             groups.append([scan])
     found = []
+    rejected = []
     for group in groups:
         pages = list(group)
         # A list-like page at either end of the group that maps too little
-        # (a divider, a short list next to the contents) is dropped, the
-        # worse end first, and its lines are the body's again for the pages
-        # that stay.
+        # - of its lines, or of its characters (a divider, a short list or a
+        # unit's first page next to the contents) - is dropped, the worse
+        # end first (by how far it falls short of its share), and its lines
+        # are the body's again for the pages that stay.
         while True:
             entries = [(scan, n, line_chars(line)) for scan in pages for n, line in lines[scan]]
             targets = [(scan, n, line_chars(line)) for scan in sorted(lines) if scan not in pages
@@ -750,17 +773,34 @@ def learn_contents(texts: Mapping[int, str], runs: Sequence[Mapping[str, Any]]) 
             mapped = map_in_order([pp.variant_fold(e[2]) for e in entries],
                                   [pp.variant_fold(t[2]) for t in targets])
             per_page = Counter(entries[m[0]][0] for m in mapped if m)
+            chars_of = Counter({scan: sum(len(e[2]) for e in entries if e[0] == scan) for scan in pages})
+            chars_mapped = Counter()
+            for e, m in zip(entries, mapped):
+                if m:
+                    chars_mapped[e[0]] += len(e[2])
             share_of = {scan: per_page[scan] / max(1, len(lines[scan])) for scan in pages}
-            ends = [scan for scan in {pages[0], pages[-1]} if share_of[scan] < CONTENTS_SHARE]
+            text_of = {scan: chars_mapped[scan] / max(1, chars_of[scan]) for scan in pages}
+            short_of = {scan: min(share_of[scan] / CONTENTS_SHARE, text_of[scan] / CONTENTS_TEXT_SHARE)
+                        for scan in pages}
+            ends = [scan for scan in {pages[0], pages[-1]} if short_of[scan] < 1]
             if not ends or len(pages) == 1 and ends:
                 if ends:
                     pages = []
                 break
-            pages.remove(min(ends, key=lambda scan: (share_of[scan], -scan)))
+            pages.remove(min(ends, key=lambda scan: (short_of[scan], -scan)))
         if not pages:
             continue
         share = sum(1 for m in mapped if m) / len(entries) if entries else 0.0
+        characters = sum(len(e[2]) for e, m in zip(entries, mapped) if m) / max(1, sum(len(e[2]) for e in entries))
         if share < CONTENTS_SHARE or not pages:
+            continue
+        body_pages = len({targets[m[1]][0] for m in mapped if m})
+        if characters < CONTENTS_TEXT_SHARE or body_pages < 2:
+            rejected.append({"pages": pages, "share": round(share, 3), "characters": round(characters, 3),
+                             "bodyPages": body_pages,
+                             "why": (f"the lines mapped hold {characters:.2f} of the run's characters, under "
+                                     f"{CONTENTS_TEXT_SHARE}") if characters < CONTENTS_TEXT_SHARE
+                             else f"every line mapped stands on one other page ({body_pages})"})
             continue
         body = pp.variant_fold("".join(t[2] for t in targets))
         rows = []
@@ -782,8 +822,9 @@ def learn_contents(texts: Mapping[int, str], runs: Sequence[Mapping[str, Any]]) 
         for run in runs:
             if any(run["first"] <= scan <= run["last"] for scan in pages):
                 word = run["suffix"]
-        found.append({"pages": pages, "share": round(share, 3), "entries": rows, "contentsWord": word})
-    return {"runs": found, "needs": CONTENTS_SHARE, "passed": bool(found)}
+        found.append({"pages": pages, "share": round(share, 3), "characters": round(characters, 3), "entries": rows,
+                      "contentsWord": word})
+    return {"runs": found, "needs": CONTENTS_SHARE, "passed": bool(found), **({"rejected": rejected} if rejected else {})}
 
 
 # --- stand-ins -------------------------------------------------------------
@@ -1106,7 +1147,9 @@ def learn(book: Any, workers: int = 1, geometry: bool = True) -> dict[str, Any]:
     contents = learn_contents({scan: book.pages[scan].sealed_text for scan in scans}, runs)
     contents_pages = sorted({p for run in contents["runs"] for p in run["pages"]})
     gates["M-6"] = {"passed": contents["passed"], "needs": CONTENTS_SHARE,
-                    "runs": [{"pages": r["pages"], "share": r["share"]} for r in contents["runs"]]}
+                    "runs": [{"pages": r["pages"], "share": r["share"], "characters": r["characters"]}
+                             for r in contents["runs"]],
+                    **({"rejected": contents["rejected"]} if contents.get("rejected") else {})}
 
     # M-7: engine B's stand-ins.
     jobs = [body_streams(book.pages[s], bands["pages"].get(s, []), b_spans.get(s, [])) for s in scans]

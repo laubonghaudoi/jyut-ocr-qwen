@@ -194,6 +194,9 @@ def unlabelled_doubts(kinds: list[str]) -> list[str]:
 # The round-4 fixes, on by default since the user's decision of 2026-09-30
 # (proofread_pages.ROUND4_DEFAULTS), and the words that call a switch off.
 ROUND4 = ("--keep-arabic-numerals", "--loop-detector", "--neighbour-guard", "--learned-heads")
+# The punctuation pass's two uses of engine A's marks as a witness, on by
+# default by the same rule (proofread_pages.ROUND4_DEFAULTS holds them too).
+ROUND4 += ("--engine-a-confirms-first-answer", "--census-skip-over-ceiling")
 CALLED_OFF = r"off by default|off until measured|default off|預設關|等實測先定|等 GPU 實測先定"
 
 

@@ -1,7 +1,8 @@
 """The book repair tool's text-run rules (scripts/repair_book.py, stage
 `runs`): the digits, Latin letters and kana both engines read between two
 characters that the page lacks, the marks a refused first answer and engine
-A agree on, and the contents numbers an earlier stage moved against both
+A agree on, the marks both engines read in a table's cells that the page
+lacks, and the contents numbers an earlier stage moved against both
 engines' reading.
 
 Why the stage exists (measured on a 609-page modern academic book,
@@ -27,8 +28,9 @@ emphasis markers, and the point before it then ends the run).
 
 What is written: a run as engine A spells it; a mark of the page stays as
 it is and where it is; a mark the page lacks is written only beside a run
-it shares engine A's line with, in engine A's glyph - an ASCII mark in its
-ordinary full-width form, unless it stands in Western text (written()).
+it shares engine A's line with, or in a table's cell (N5), in engine A's
+glyph - an ASCII mark in its ordinary full-width form, unless it stands in
+Western text (written()).
 
 Rules, in the order they run (the first two applied before the rest; all
 three steps pass the page-edge check, edge_safe):
@@ -74,6 +76,40 @@ three steps pass the page-edge check, edge_safe):
   The rows of a table that phase 3 moved into an earlier page's table (the
   seal's tableStitch) are read on the page whose engines read them, in its
   text before the move, and written where the rows stand now (_moved_rows).
+- N5 a gap inside a table of the page (table_spans: a Markdown table from
+  its label row and rule, an HTML table from its opening tag to its closing
+  one) beside a character that lies in an engine A block the punctuator
+  never read (its label in proofread_pages.FURNITURE_LABELS: a table
+  block; cell_gap, per side of the gap), where the page holds neither a
+  mark nor a run and both engines hold the same tokens, marks alone or
+  marks with runs: the gap becomes the engines' - marks and runs in engine
+  A's order and glyphs (written), the page's cell boundaries, spaces and
+  breaks where they are, the cell boundaries matched one to one
+  (stretches; a gap that N1 weaves is written once, whole, and named N5
+  when it holds a mark N1 leaves - N1 again where the bracket guard
+  withheld every such mark).  Phase 3 runs no punctuation pass on a table
+  block: its cells hold engine A's marks, none, or the （） the structure
+  pass's lock lets it add, so an empty gap of such a cell where both
+  engines read marks is lost print, whereas in running text - and in a
+  page table the structure pass built from a text block that had its own
+  pass - an empty gap may be the punctuator's reading of the crop and
+  stays.  Measured on the 609-page book (2026-10-02): where engine A's
+  grid was refused, the structure pass rebuilt the table from the bare
+  merged characters with punctuation locked, and 30 pages' cells were
+  sealed with 29 of the 1,040 marks engine A read there; the rule wrote
+  723 marks in 645 gaps on 18 pages, and 30 of 30 of its edits drawn at
+  random matched the print on the page image; the one page table built
+  from a punctuated text block (scan 606) gets no edit.  Not on a page
+  punctuated whole (unread_marks), nor in a table rebuilt from its crop
+  (unread_tables): there an empty gap may be the model's reading.  Not
+  where engine A holds a star, a character a renderer reads as markup
+  (RENDERER_MARKS) or one that prints nothing, nor a note marker; the
+  bracket guard (unpaired) holds for these marks too, over all the edits
+  of the page together, so the two brackets of a pair written in two gaps
+  of one row stand - not across a cell boundary, nor around a gap between
+  them where engine A read brackets the page will not hold.  The marks
+  the rule found and could not write are one doubt a page
+  (`run-no-place`, with their count).
 - N3 the page's marks in the gap are the engines' agreed marks in another
   order (an emptied bracket pair written `）（`), both engines writing the
   whole gap alike: the gap is rewritten in their order, with the runs, each
@@ -98,9 +134,11 @@ engine B is not aligned at), a gap where the engines differ, an agreed run
 with no clean place, a stretch whose marks could not be restored and a
 heading that could not be put back are doubts (`run-one-engine`,
 `run-engines-differ`, `run-no-place`, `retry-marks-unverified`,
-`heading-kind-unknown`); the note numbers of a page that the engines read
+`heading-kind-unknown`; none for a gap of marks alone in running text,
+which no rule writes); the note numbers of a page that the engines read
 and the page lacks or writes with another value are one doubt per page
-(`note-markers-unverified`).
+(`note-markers-unverified`), and so are the marks of a page's table cells
+that N5 found and could not write (`run-no-place`, with their count).
 """
 
 from __future__ import annotations
@@ -111,6 +149,7 @@ from typing import Any, Callable, Iterable, Mapping, Sequence
 
 import proofread_pages as pp
 import _ocr_markdown as om
+import _tables
 import _repair_align as ra
 import _repair_edits as re_
 import _repair_joins as rj
@@ -409,7 +448,7 @@ def fused(toks: Sequence[Token]) -> str:
             out.append(("\x03" if last_run else "") + t.raw.translate(RUN_FOLD))
             last_run = True
         elif t.kind == MARK:
-            out.append("'" if t.raw in ("'", "\u2019") else _FUSED_MARK.get(t.cls) or f"\x01{t.cls}\x01")
+            out.append("'" if t.raw in ("'", "\u2018", "\u2019") else _FUSED_MARK.get(t.cls) or f"\x01{t.cls}\x01")
             last_run = False
         elif t.kind in (MARKER, OTHER):
             out.append(f"\x02{t.kind}:{t.cls}\x02")
@@ -421,6 +460,29 @@ def agree(a: Sequence[Token], b: Sequence[Token]) -> bool:
     """Whether two readings of a gap hold the same print (table boundaries
     aside)."""
     return keys(a, cells=False) == keys(b, cells=False) or fused(a) == fused(b)
+
+
+# What two readings of Western text may differ in and still be one reading
+# of the print: a hyphen between two letters (a word one engine keeps
+# hyphenated at the printed line's end and the other joins - Conten-tious /
+# Contentious, Pre-ss / Press on the modern book's notes and bibliography) and
+# an apostrophe's form (fused folds the curly ones).  Not a hyphen between
+# figures: 91-104 is a range and 91104 a number.
+_LOOSE_HYPHEN = re.compile(r"(?<=[^\W\d_])-(?=[^\W\d_])")
+
+
+def loose(toks: Sequence[Token]) -> str:
+    """The print of TOKS as fused() gives it, with the hyphens inside words out."""
+    return _LOOSE_HYPHEN.sub("", fused(toks))
+
+
+def nearly(a: Sequence[Token], b: Sequence[Token]) -> bool:
+    """Whether two readings that do not agree() differ in hyphens inside words
+    or in the form of an apostrophe only (loose).  Such a gap is written as
+    engine A reads it, with a doubt naming both readings: on the modern book
+    one such hyphen kept the whole of a 44-run footnote and a 176-run
+    bibliography page out, while every other run of them agreed."""
+    return runs_of(a) != [] and runs_of(b) != [] and loose(a) == loose(b)
 
 
 def runs_of(toks: Sequence[Token]) -> list[Token]:
@@ -456,6 +518,18 @@ class Gap:
     edge: str = ""
     # Set by weave(): how many marks of the page it left out as a run's own.
     dropped: int = 0
+    # N5: the spans of the page's tables whose marks no model read
+    # (unread_tables), and whether the character before the gap and the one
+    # after it lie in an engine A block the punctuator never read (`bare`),
+    # both set by cell_gap() where the gap is one whose marks the rule
+    # writes; stretches() then writes a stretch of marks alone that lies in
+    # one of them beside such a character, lists in `cells` the offsets (in
+    # the text written) of the marks it wrote that N1 leaves, and counts in
+    # `cell_lost` the marks of such stretches it could not write.
+    tables: Sequence[tuple[int, int]] = ()
+    bare: tuple[bool, bool] = (False, False)
+    cells: list[int] = field(default_factory=list)
+    cell_lost: int = 0
 
 
 class PageRuns:
@@ -476,6 +550,8 @@ class PageRuns:
         longest = max((len(form) for form in folio_forms), default=0)
         self.folio_whole = {form for form in folio_forms if len(form) == longest}
         self._block_of = rr.a_blocks_of(pd) if pd.a_blocks and pp.CJK(pd.a_body) else []
+        # N5: the page's tables whose marks no model read from the image.
+        self.tables = unread_tables(self)
 
     def span(self, k: int) -> tuple[int, int]:
         start = 0 if k == 0 else self.s.offsets[k - 1] + 1
@@ -520,19 +596,81 @@ class PageRuns:
     def context(self, k: int, width: int = 4) -> tuple[str, str]:
         return self.s.chars[max(0, k - width):k], self.s.chars[k:k + width]
 
-    def a_label(self, k: int) -> str | None:
-        """Engine A's block label of the block holding the engine character
-        the page character K aligns to."""
+    def a_block(self, k: int) -> Mapping[str, Any] | None:
+        """Engine A's block holding the engine character the page character
+        K aligns to; None where K aligns to none or the blocks are not known."""
         j = self.to_a[k] if 0 <= k < len(self.to_a) else None
         if j is None or not self._block_of or j >= len(self._block_of):
             return None
         block = self._block_of[j]
-        return self.pd.a_blocks[block].get("label") if 0 <= block < len(self.pd.a_blocks) else None
+        return self.pd.a_blocks[block] if 0 <= block < len(self.pd.a_blocks) else None
+
+    def a_label(self, k: int) -> str | None:
+        """Engine A's block label of the block holding the engine character
+        the page character K aligns to."""
+        block = self.a_block(k)
+        return block.get("label") if block is not None else None
 
     def line_span(self, offset: int) -> tuple[int, int]:
         start = self.text.rfind("\n", 0, offset) + 1
         end = self.text.find("\n", offset)
         return start, (len(self.text) if end < 0 else end)
+
+
+def table_spans(text: str) -> list[tuple[int, int]]:
+    """The spans of TEXT's tables as the skill reads them
+    (_tables.find_tables): a Markdown table from its label row and rule to
+    its last row, an HTML table from its opening tag to its closing one.  A
+    line that merely holds a pipe is no table."""
+    return [(table.start, table.end) for table in _tables.find_tables(text)]
+
+
+def unread_marks(record: Mapping[str, Any]) -> bool:
+    """Whether phase 3 punctuated the page block by block (the seal's
+    record), so that a block it gave no pass (an engine A table block,
+    proofread_pages.FURNITURE_LABELS) holds engine A's marks, none, or the
+    （） the structure pass's lock lets it add.  Not on a page punctuated
+    whole (the seal's doubt `punctuation-whole-page`): there the formatter
+    wrote the tables' marks from the page image, and an empty gap may be its
+    reading, as in running text.  A seal with no `doubts` key is an older
+    one that recorded none: phase 3 derives the whole-page doubt for it at
+    read time (proofread_pages.rederive_doubts) and this stage does not, so
+    the page is taken as read unless its punctuationPasses show the block
+    passes (a page with passes was not punctuated whole).  A table rebuilt
+    from its crop is set aside per table (unread_tables)."""
+    doubts = record.get("doubts")
+    if doubts is None:
+        return bool(record.get("punctuationPasses"))
+    return not any(isinstance(d, Mapping) and d.get("kind") == "punctuation-whole-page" for d in doubts)
+
+
+def unread_tables(page: PageRuns) -> list[tuple[int, int]]:
+    """N5: the spans of PAGE's tables whose marks no model read from the
+    image - none on a page not punctuated block by block (unread_marks), and
+    not a table that holds a character of a block the structure pass
+    rebuilt from its crop (the seal's tablesRebuilt, outcome accepted: its
+    block and the blocks of its region, by engine A's layout index): the
+    rebuilt table holds the brackets and commas the model saw there, so an
+    empty gap of it may be that reading.  The other tables of such a page
+    are read as any (one rebuilt table used to switch the rule off for the
+    whole page).  A rebuilt block that no table character aligns to names
+    no table (a page character aligned to no block has no label either, and
+    cell_gap keeps the rule off it)."""
+    if not unread_marks(page.pd.record):
+        return []
+    spans = table_spans(page.text)
+    rebuilt = {index for r in page.pd.record.get("tablesRebuilt") or [] if isinstance(r, Mapping)
+               and r.get("outcome") == "accepted"
+               for index in (r.get("block"), *(r.get("region") or [])) if isinstance(index, int)}
+    if not rebuilt:
+        return spans
+
+    def of_rebuilt(k: int) -> bool:
+        block = page.a_block(k)
+        return block is not None and block.get("index") in rebuilt
+
+    return [(start, end) for start, end in spans
+            if not any(of_rebuilt(k) for k in range(bisect_left(page.s.offsets, start), bisect_left(page.s.offsets, end)))]
 
 
 @dataclass
@@ -671,7 +809,7 @@ def weave(gap: Gap) -> tuple[str, str, list[str]] | tuple[None, str, list[str]]:
     a_marks = [t for t in a_toks if t.kind in (MARK, CELL, ROW)]
     p_marks = [t for t in p_toks if t.kind in (MARK, CELL, ROW)]
     names = [t.raw for t in a_runs]
-    gap.wrote, gap.dropped = [], 0
+    gap.wrote, gap.dropped, gap.cells, gap.cell_lost = [], 0, [], 0
     if any(t.kind in (MARKER, OTHER) for t in a_toks) or any(t.kind in (MARKER, OTHER) for t in p_toks):
         return None, "a note marker or unknown markup stands in the gap", names
     if any(line_initial_figure(a_toks, run, gap.k == 0) for run in a_runs):
@@ -696,9 +834,9 @@ def weave(gap: Gap) -> tuple[str, str, list[str]] | tuple[None, str, list[str]]:
         # end give the same text.
         other = _match(a_marks, p_marks, a_runs, gap.b, leftmost=False)
         if new is not None and other is not None and other[0] != matched:
-            wrote = list(gap.wrote)
+            wrote, cells, lost = list(gap.wrote), list(gap.cells), gap.cell_lost
             again = stretches(gap, a_marks, p_marks, other[0], names)[0]
-            gap.wrote = wrote
+            gap.wrote, gap.cells, gap.cell_lost = wrote, cells, lost
             if again != new:
                 return None, "the run's place among the page's marks is not unique", names
         return new, why, names
@@ -836,46 +974,68 @@ def written(part: Sequence[Token], full_round: bool = False) -> tuple[str, list[
 
 
 def _stretch(a_part: Sequence[Token], p_part: Sequence[Token], edge: str = "",
-             full_round: bool = False) -> tuple[str, list[int]] | None:
+             full_round: bool = False, whole: bool = False) -> tuple[str, list[int], list[int]] | None:
     """One stretch of a gap between two marks the page shares with the
     engines (or the gap's edge): the page's spaces, breaks and structure,
     with what engine A holds on each of its lines there that has a run -
     the run and the marks beside it on that line; a line of marks alone is
-    left as the page has it.  Before the page's line break goes engine A's
-    line before its own, after it the line that follows.  None when a run's
-    side of the page's break is not given, and at a page's EDGE ("start",
-    "end") when engine A has the run on a line of its own beyond the page's
-    first or last line."""
+    left as the page has it, unless the stretch lies in a table cell (N5,
+    WHOLE): its marks are written too, and the offsets of those marks (the
+    ones N1 leaves) are the third item returned, after the text and the
+    offsets of its brackets.  Before the page's line break goes engine A's
+    line before its own, after it the line that follows; so too about the
+    page's spaces where a table cell holds nothing else there and engine A
+    breaks the line (the print wraps in the cell: the second title's
+    opening bracket goes after the space, not before it - a made-up page,
+    check_repair_runs cell_checks), and where engine A has a line between
+    them with marks of its own the stretch is left as the page has it (none
+    of the page's spaces is that line's).  None when a run's side of the
+    page's break is not given (in a table cell, a mark's), and at a page's
+    EDGE ("start", "end") when engine A has the run on a line of its own
+    beyond the page's first or last line."""
     p_raw = "".join(t.raw for t in p_part)
-    if not runs_of(a_part):
-        return p_raw, []
-    lines: list[list[Token]] = [[]]
-    for t in a_part:
-        if t.kind == BREAK:
-            lines.append([])
-        else:
-            lines[-1].append(t)
+    lines = _lines_of(a_part)
+
+    def wanted(line: Sequence[Token]) -> bool:
+        return bool(runs_of(line)) or (whole and any(t.kind == MARK for t in line))
+
+    def cell_marks(line: Sequence[Token], text: str) -> list[int]:
+        # The marks N1 leaves: those of a line with no run (written() spells
+        # such a line as its marks alone).
+        if runs_of(line) or not whole:
+            return []
+        return [t.start for t in tokens(text, "page") if t.kind == MARK]
+
+    if not any(wanted(line) for line in lines):
+        return p_raw, [], []
     if len(lines) > 1 and edge == "end" and any(runs_of(line) for line in lines[1:]):
         return None
     if len(lines) > 1 and edge == "start" and any(runs_of(line) for line in lines[:-1]):
         return None
-    if not any(t.kind in (BREAK, STRUCT) for t in p_part):
+    spaces_only = whole and bool(p_part) and all(t.kind == SPACE for t in p_part)
+    if not any(t.kind in (BREAK, STRUCT) for t in p_part) and not (spaces_only and len(lines) > 1):
         out = ""
         brackets: list[int] = []
+        cells: list[int] = []
         for line in lines:
-            if not runs_of(line):
+            if not wanted(line):
                 continue
             text, at = written(line, full_round)
             if out and text and re.match(rf"[{ALNUM}]", text) and re.search(rf"[{ALNUM}]$", out):
                 out += " "
             brackets.extend(len(out) + offset for offset in at)
+            cells.extend(len(out) + offset for offset in cell_marks(line, text))
             out += text
-        return out + p_raw, brackets
-    if len(lines) < 2 or any(runs_of(line) for line in lines[1:-1]):
+        return out + p_raw, brackets, cells
+    if any(wanted(line) for line in lines[1:-1]):
+        return (p_raw, [], []) if spaces_only else None
+    if len(lines) < 2:
         return None
-    head, head_brackets = written(lines[0], full_round) if runs_of(lines[0]) else ("", [])
-    tail, tail_brackets = written(lines[-1], full_round) if runs_of(lines[-1]) else ("", [])
-    return head + p_raw + tail, head_brackets + [len(head) + len(p_raw) + at for at in tail_brackets]
+    head, head_brackets = written(lines[0], full_round) if wanted(lines[0]) else ("", [])
+    tail, tail_brackets = written(lines[-1], full_round) if wanted(lines[-1]) else ("", [])
+    shift = len(head) + len(p_raw)
+    return (head + p_raw + tail, head_brackets + [shift + at for at in tail_brackets],
+            cell_marks(lines[0], head) + [shift + at for at in cell_marks(lines[-1], tail)])
 
 
 def stretches(gap: Gap, a_marks: Sequence[Token], p_marks: Sequence[Token], matched: Mapping[int, int],
@@ -885,8 +1045,11 @@ def stretches(gap: Gap, a_marks: Sequence[Token], p_marks: Sequence[Token], matc
     marks that stand beside them).  The page's marks stay; a stretch between
     two of them that holds a run becomes the engines' - runs and marks in
     engine A's order (_stretch, written) - and a stretch of marks alone is
-    left as the page has it.  The brackets written are listed in gap.wrote
-    (text_runs withholds one that finds no partner on its line)."""
+    left as the page has it - but written where the stretch lies in a table
+    whose marks N5 writes (gap.tables, gap.bare, _in_table; gap.cells lists
+    the offsets of those marks, gap.cell_lost counts the ones of such a
+    stretch that could not be written).  The brackets written are listed in
+    gap.wrote (text_runs withholds one that finds no partner on its line)."""
     a_toks, p_toks = gap.a or [], gap.page
     if any(t.kind in (CELL, ROW) and j not in matched for j, t in enumerate(a_marks)):
         return None, "the page's marks are not the engines'", names
@@ -894,48 +1057,158 @@ def stretches(gap: Gap, a_marks: Sequence[Token], p_marks: Sequence[Token], matc
     full_round = any(t.kind == MARK and t.raw in "\uff08\uff09" for t in p_marks)
     out: list[str] = []
     wrote: list[int] = []
+    cells: list[int] = []
     a_at = p_at = 0
-    size = 0
+    size = lost = 0
     for n in range(len(pairs) + 1):
         a_mark = a_marks[pairs[n][0]] if n < len(pairs) else None
         p_mark = p_marks[pairs[n][1]] if n < len(pairs) else None
         a_part = [t for t in a_toks if t.start >= a_at and (a_mark is None or t.end <= a_mark.start)]
         p_part = [t for t in p_toks if t.start >= p_at and (p_mark is None or t.end <= p_mark.start)]
         edge = gap.edge if (gap.edge == "start" and n == 0) or (gap.edge == "end" and n == len(pairs)) else ""
-        piece = _stretch(a_part, p_part, edge, full_round)
+        whole = _in_table(gap, n == 0, n == len(pairs), p_at)
+        # The marks of the stretch that N5 is to write: those of engine A's
+        # lines there with no run.
+        found = sum(1 for line in _lines_of(a_part) if not runs_of(line) for t in line if t.kind == MARK) if whole else 0
+        piece = _stretch(a_part, p_part, edge, full_round, whole)
+        if piece is None and whole:
+            # The marks' side of the page's line break is not given: the
+            # stretch as N1 alone writes it.
+            piece = _stretch(a_part, p_part, edge, full_round)
         if piece is None:
             return None, "the run's place among the page's marks is not unique", names
-        text, brackets = piece
-        if text.strip() and runs_of(a_part):
+        text, brackets, marks = piece
+        lost += found - len(marks)
+        if text.strip() and text != "".join(t.raw for t in p_part):
             # A space between what is written and a table cell's pipe.
             if out and out[-1].endswith("|") and not text.startswith(" "):
-                text, brackets = " " + text, [at + 1 for at in brackets]
+                text, brackets, marks = " " + text, [at + 1 for at in brackets], [at + 1 for at in marks]
             if p_mark is not None and p_mark.raw.startswith("|") and not text.endswith(" "):
                 text += " "
         wrote.extend(size + at for at in brackets)
+        cells.extend(size + at for at in marks)
         out.append(text)
         size += len(text)
         if a_mark is not None and p_mark is not None:
             out.append(p_mark.raw)
             size += len(p_mark.raw)
             a_at, p_at = a_mark.end, p_mark.end
-    gap.wrote = wrote
+    gap.wrote, gap.cells, gap.cell_lost = wrote, cells, lost
     return "".join(out), "T2", names
 
 
-def unpaired(text: str, edits: Sequence[re_.Edit], wrote: dict[int, list[int]]) -> None:
+def _in_table(gap: Gap, first: bool, last: bool, at: int) -> bool:
+    """N5: whether a stretch of GAP lies in one of the page's tables
+    (gap.tables; none where the rule does not hold for the gap) beside a
+    character of a block the punctuator never read (gap.bare): the gap's
+    FIRST stretch with the character before the gap, its LAST with the
+    character after it - at a page's edge there is none, and what stands
+    beyond the page's first or last character is not a cell's - and a
+    stretch between two cell boundaries where it stands (AT, its offset in
+    the gap's text), when both characters are such."""
+    if not gap.tables:
+        return False
+
+    def inside(offset: int) -> bool:
+        return any(start <= offset < end for start, end in gap.tables)
+
+    before, after = gap.bare
+    if first and (gap.edge == "start" or not inside(gap.start - 1) or not before):
+        return False
+    if last and (gap.edge == "end" or not inside(gap.end) or not after):
+        return False
+    return first or last or (inside(gap.start + at) and before and after)
+
+
+# Marks a renderer reads as markup, not print: a table's note sign or
+# emphasis (`*`, `_`, a backtick, `#`), a link or a strike (`[`, `]`, `~`),
+# a tag or an escape (`<`, `>`, a backslash).
+RENDERER_MARKS = frozenset("*_`#~[]\\<>")
+
+
+def unprintable(text: str) -> bool:
+    """Whether TEXT holds a character that prints nothing (Unicode category
+    Z: a space of some width; C: a control, a format character such as a
+    zero-width space)."""
+    import unicodedata
+    return any(unicodedata.category(c)[0] in "ZC" for c in text)
+
+
+def cell_gap(page: PageRuns, gap: Gap) -> bool:
+    """N5: whether GAP is one whose marks the rule writes - the page has
+    tables whose marks no model read (page.tables) and holds in the gap
+    nothing but cell boundaries, spaces and breaks; a character beside the
+    gap lies in an engine A block the punctuator never read (its label in
+    proofread_pages.FURNITURE_LABELS: a table block; gap.bare, per side -
+    the structure pass builds a page table from a punctuated text block too,
+    and an empty gap of that table may be the punctuator's reading: scan 606
+    of the 609-page book, whose 366 table characters are in a `text` block
+    with a pass of 11 marks); both engines hold the same tokens there,
+    engine A a mark among them, and neither a note marker or unknown markup
+    nor a star or a character a renderer reads as markup (RENDERER_MARKS)
+    nor one that prints nothing (unprintable).  Sets gap.tables and
+    gap.bare, by which stretches() writes the marks of the stretches that
+    lie in a table."""
+    if not page.tables or gap.a is None or gap.b is None:
+        return False
+    if any(t.kind not in (CELL, ROW, SPACE, BREAK, STRUCT) for t in gap.page):
+        return False
+    marks = [t for t in gap.a if t.kind == MARK]
+    if not marks or any(_markup(t) or t.cls == "star" or set(t.raw) & RENDERER_MARKS or unprintable(t.raw) for t in marks) \
+            or any(t.kind in (MARKER, OTHER) for t in gap.a + gap.b) or not agree(gap.a, gap.b):
+        return False
+
+    def bare(k: int) -> bool:
+        return 0 <= k < len(page.s.chars) and page.a_label(k) in pp.FURNITURE_LABELS
+
+    gap.bare = (bare(gap.k - 1), bare(gap.k))
+    if not any(gap.bare):
+        return False
+    gap.tables = page.tables
+    return True
+
+
+CELL_BOUNDARY_RE = re.compile(r"\||</t[dh]>", re.I)
+
+
+def brackets_of(toks: Sequence[Token]) -> int:
+    """How many brackets (marks of an opening or closing class) TOKS hold."""
+    return sum(1 for t in toks if t.kind == MARK and (t.cls in OPEN_CLASSES or t.cls in CLOSE_CLASSES))
+
+
+def unpaired(text: str, edits: Sequence[re_.Edit], wrote: dict[int, list[int]],
+             lacking: Sequence[tuple[int, int, int]] = (), cells: dict[int, list[int]] | None = None) -> None:
     """Withhold each bracket this stage would write that has no partner on
     its line once all of the page's EDITS stand (WROTE: per edit, by id, the
     offsets in its text of the brackets written from the engines): a
-    bracket whose partner the page lacks would open or close nothing.  The
-    edit keeps the rest and names what was withheld."""
+    bracket whose partner the page lacks would open or close nothing.  Two
+    brackets with a cell boundary between them (a pipe, `</td>`) are no
+    pair, nor are two whose span encloses a gap of LACKING (per gap of the
+    page: its span in TEXT and how many brackets engine A holds there) in
+    which the page with its edits holds fewer brackets than engine A: where
+    the engines differ between two titles of a cell, or the page breaks the
+    line where engine A does not, the gap between the titles is not written,
+    and the outer brackets would show one title where the print has two
+    (made-up pages, check_repair_runs cell_checks; on the 609-page book no
+    pair of the stage's output enclosed such a gap, measured 2026-10-02).
+    Both brackets of such a pair are withheld where they are this stage's.
+    The edit keeps the rest and names what was withheld; CELLS (per edit,
+    the offsets of the marks N5 writes) follows its text."""
     if not any(wrote.get(id(e)) for e in edits):
         return
+    ordered = sorted(edits, key=lambda e: (e.start, e.end))
+
+    def shifted(offset: int, within: bool) -> int:
+        # The offset in the trial of a page offset: past the edits before it
+        # (WITHIN: an edit that ends there is inside the span measured).
+        return offset + sum(len(e.after) - (e.end - e.start) for e in ordered
+                            if (e.end <= offset if within else e.start < offset))
+
     while True:
         pieces: list[str] = []
         ours: dict[int, tuple[re_.Edit, int]] = {}
         at = size = 0
-        for edit in sorted(edits, key=lambda e: (e.start, e.end)):
+        for edit in ordered:
             pieces.append(text[at:edit.start])
             size += edit.start - at
             for offset in wrote.get(id(edit), ()):
@@ -945,11 +1218,24 @@ def unpaired(text: str, edits: Sequence[re_.Edit], wrote: dict[int, list[int]]) 
             at = edit.end
         pieces.append(text[at:])
         trial = "".join(pieces)
+        gaps = []
+        for start, end, held in lacking:
+            span = (shifted(start, False), shifted(end, True))
+            if brackets_of(tokens(trial[span[0]:span[1]], "page")) < held:
+                gaps.append(span)
         alone: list[int] = []
         start = 0
         for line in trial.split("\n"):
             stack: list[tuple[str, int]] = []
-            for i, c in enumerate(line):
+            i = 0
+            while i < len(line):
+                boundary = CELL_BOUNDARY_RE.match(line, i)
+                if boundary:
+                    alone.extend(at_ for _, at_ in stack)
+                    stack.clear()
+                    i = boundary.end()
+                    continue
+                c = line[i]
                 cls = MARK_CLASS.get(c)
                 if cls in OPEN_CLASSES:
                     stack.append((cls, start + i))
@@ -960,7 +1246,11 @@ def unpaired(text: str, edits: Sequence[re_.Edit], wrote: dict[int, list[int]]) 
                         alone.append(start + i)
                     else:
                         alone.extend(at_ for _, at_ in stack[j + 1:])
+                        opened = stack[j][1]
+                        if any(opened < gap_start and gap_end <= start + i for gap_start, gap_end in gaps):
+                            alone.extend((opened, start + i))
                         del stack[j:]
+                i += 1
             alone.extend(at_ for _, at_ in stack)
             start += len(line) + 1
         drop: dict[int, list[int]] = {}
@@ -971,13 +1261,15 @@ def unpaired(text: str, edits: Sequence[re_.Edit], wrote: dict[int, list[int]]) 
         if not drop:
             return
         for edit in edits:
-            offsets = sorted(drop.get(id(edit), ()))
+            offsets = sorted(set(drop.get(id(edit), ())))
             if not offsets:
                 continue
             withheld = [edit.after[o] for o in offsets]
-            kept = [o for o in wrote[id(edit)] if o not in offsets]
             after = "".join(c for o, c in enumerate(edit.after) if o not in offsets)
-            wrote[id(edit)] = [o - sum(1 for x in offsets if x < o) for o in kept]
+            for listed in (wrote, cells or {}):
+                if id(edit) in listed:
+                    kept = [o for o in listed[id(edit)] if o not in offsets]
+                    listed[id(edit)] = [o - sum(1 for x in offsets if x < o) for o in kept]
             edit.after = after
             edit.evidence = {**edit.evidence, "withheld": list(edit.evidence.get("withheld") or []) + withheld}
 
@@ -1273,7 +1565,7 @@ def _ends_line_before(lead: str | None, digits: str, first: bool) -> bool:
     if not m:
         return False
     before = lead[:m.start()]
-    return bool(before.rsplit("\n", 1)[-1].strip()) or ("\n" not in before and not first)
+    return not rs.markup_only(before.rsplit("\n", 1)[-1]) or ("\n" not in before and not first)
 
 
 def _opens(a_lead: str | None, b_lead: str | None, bracket: str) -> bool:
@@ -1430,6 +1722,13 @@ class Tally:
     differing: list[str] = field(default_factory=list)
     # The runs engine A alone read where engine B is not aligned: (place, runs).
     alone: list[tuple[str, list[str]]] = field(default_factory=list)
+    # N5: the gaps of a table whose marks both engines read and the page
+    # lacks, where the marks could not be written (place, engine A's text),
+    # how many marks those gaps hold, and how many of the rule's marks the
+    # bracket guard withheld.
+    cells: list[str] = field(default_factory=list)
+    cell_marks: int = 0
+    withheld: int = 0
 
 
 def _markers(toks: Sequence[Token] | None) -> list[str]:
@@ -1463,7 +1762,7 @@ def head_gap(gap: Gap) -> Gap | None:
 
 
 def text_runs(setting: Setting, plan: rr.Plan) -> None:
-    """N1, N3 and N2 over the pages: the edits proposed (not yet applied)
+    """N1, N5, N3 and N2 over the pages: the edits proposed (not yet applied)
     and the doubts, added to PLAN."""
     for scan in setting.order:
         page = setting.page(scan)
@@ -1484,18 +1783,37 @@ def _page_runs(setting: Setting, page: PageRuns, plan: rr.Plan, inside: tuple[in
     tally = Tally()
     found: list[re_.Edit] = []
     wrote: dict[int, list[int]] = {}
+    cells: dict[int, list[int]] = {}
+    # The gaps where engine A holds brackets, for the pairing guard (unpaired).
+    lacking: list[tuple[int, int, int]] = []
 
     def answered(start: int, end: int) -> bool:
         return inside is None and written_in(setting.mask, scan, start, end)
 
     def woven(gap: Gap, new: str, tier: str, names: Sequence[str]) -> None:
-        edit = _edit(scan, gap, new, "N1", tier, names)
+        # N5 where the text written holds a mark of a table cell that N1 leaves.
+        if gap.cells:
+            edit = _edit(scan, gap, new, "N5", "cell marks, runs" if names else "cell marks", names)
+            cells[id(edit)] = list(gap.cells)
+        else:
+            edit = _edit(scan, gap, new, "N1", tier, names)
         wrote[id(edit)] = list(gap.wrote)
         found.append(edit)
+
+    def unwritten(gap: Gap, new: str | None) -> None:
+        # N5: the marks of a table gap the rule holds for (cell_gap) that it
+        # could not write - the whole gap (its cell boundaries are not the
+        # engines' one to one), or a stretch of it (stretches, _stretch).
+        count = sum(1 for t in gap.a or [] if t.kind == MARK) if new is None else gap.cell_lost
+        if count:
+            tally.cells.append(f"{page.context(gap.k)[0]}\u2038{show(gap.a_raw or '', 16)}")
+            tally.cell_marks += count
 
     for gap in page.gaps():
         if inside is not None and not (gap.end > inside[0] and gap.start < inside[1]):
             continue
+        if gap.a is not None and brackets_of(gap.a):
+            lacking.append((gap.start, gap.end, brackets_of(gap.a)))
         if gap.a is None:
             # Engine B alone: a run the page lacks, with no engine A witness.
             if gap.b is not None and runs_of(gap.b) and not runs_of(gap.page) and not _markers(gap.b) \
@@ -1535,6 +1853,13 @@ def _page_runs(setting: Setting, page: PageRuns, plan: rr.Plan, inside: tuple[in
             if gap.b is not None and runs_of(gap.b) and not p_runs and not _is_folio(page, gap, gap.b):
                 plan.doubts.append(("run-one-engine", scan, _gap_detail(page, gap, "engine A reads none"),
                                     {"engine": "B", "runs": [t.raw for t in runs_of(gap.b)]}))
+            elif cell_gap(page, gap) and not answered(gap.start, gap.end):
+                # N5, marks alone: written where their place is given, and
+                # counted for the page's one doubt where it is not.
+                new, tier, names = weave(gap)
+                if new is not None and gap.cells and new != text[gap.start:gap.end]:
+                    woven(gap, new, tier, names)
+                unwritten(gap, new)
             continue
         if p_runs:
             if [t.key for t in p_runs] == [t.key for t in a_runs] or fused(gap.page) == fused(gap.a):
@@ -1550,7 +1875,14 @@ def _page_runs(setting: Setting, page: PageRuns, plan: rr.Plan, inside: tuple[in
             # page's notes, and each of their runs is such a gap.
             tally.alone.append((f"{page.context(gap.k)[0]}\u2038{show(gap.a_raw or '', 24)}", [t.raw for t in a_runs]))
             continue
-        if not agree(gap.a, gap.b):
+        near = not agree(gap.a, gap.b) and nearly(gap.a, gap.b)
+        if near:
+            # Written as engine A reads it (below); the two readings on record.
+            plan.doubts.append(("run-engines-differ", scan,
+                                _gap_detail(page, gap, "hyphens or apostrophes apart; written as engine A reads it"),
+                                {"engineA": [t.raw for t in a_runs], "engineB": [t.raw for t in runs_of(gap.b)],
+                                 "written": "A"}))
+        elif not agree(gap.a, gap.b):
             b_runs = runs_of(gap.b)
             if not b_runs:
                 plan.doubts.append(("run-one-engine", scan, _gap_detail(page, gap, "engine B reads none"),
@@ -1587,7 +1919,11 @@ def _page_runs(setting: Setting, page: PageRuns, plan: rr.Plan, inside: tuple[in
             plan.doubts.append(("run-no-place", scan, _gap_detail(page, gap, "a model answer wrote here"),
                                 {"runs": [t.raw for t in a_runs]}))
             continue
+        # N5: in a table, the marks of the gap are written with its runs.
+        in_cell = cell_gap(page, gap)
         new, tier, names = weave(gap)
+        if in_cell:
+            unwritten(gap, new)
         if new is None:
             rewritten = permuted(gap)
             if rewritten is not None:
@@ -1597,6 +1933,21 @@ def _page_runs(setting: Setting, page: PageRuns, plan: rr.Plan, inside: tuple[in
             continue
         if new != text[gap.start:gap.end]:
             woven(gap, new, tier, names)
+    proposed = {key: len(offsets) for key, offsets in cells.items()}
+    unpaired(text, found, wrote, lacking, cells)
+    for edit in found:
+        if edit.rule != "N5":
+            continue
+        # N5 names the edit for the marks of a cell that N1 leaves; where the
+        # bracket guard withheld every one of them, what is left is N1's (its
+        # runs with the marks beside them), or nothing of the print (a space
+        # put beside a pipe for a mark withheld): the gap stays as it is.
+        tally.withheld += proposed[id(edit)] - len(cells[id(edit)])
+        if not cells[id(edit)]:
+            if edit.evidence.get("runs"):
+                edit.rule, edit.evidence = "N1", {**edit.evidence, "tier": "T2"}
+            else:
+                edit.after = text[edit.start:edit.end]
     if tally.alone:
         places = "; ".join(place for place, _ in tally.alone)
         plan.doubts.append(("run-one-engine", scan,
@@ -1611,7 +1962,17 @@ def _page_runs(setting: Setting, page: PageRuns, plan: rr.Plan, inside: tuple[in
             parts.append(f"{len(tally.differing)} of another value ({'; '.join(tally.differing[:3])})")
         plan.doubts.append(("note-markers-unverified", scan, ("note markers the engines read: " + ", ".join(parts))[:220],
                             {"lacking": len(tally.lacking), "differing": len(tally.differing)}))
-    unpaired(text, found, wrote)
+    if tally.cells or tally.withheld:
+        # N5: one doubt a page for the marks it found and could not write.
+        parts = []
+        if tally.cells:
+            parts.append(f"{tally.cell_marks} in {len(tally.cells)} gap(s) with no place for them "
+                         f"({'; '.join(tally.cells[:3])})")
+        if tally.withheld:
+            parts.append(f"{tally.withheld} bracket(s) withheld, no partner on the line or in the cell")
+        plan.doubts.append(("run-no-place", scan,
+                            ("table marks both engines read that the page lacks, not written: " + ", ".join(parts))[:220],
+                            {"marks": tally.cell_marks + tally.withheld, "gaps": len(tally.cells), "withheld": tally.withheld}))
     return found
 
 
@@ -1622,7 +1983,11 @@ def _moved_rows(setting: Setting, scan: int, plan: rr.Plan) -> None:
     so they are read there: the page's text as it stood before the move
     against SCAN's engines, the gaps that touch the rows.  Each edit is made
     on the page that holds the rows now, where the lines it touches stand
-    there once and unchanged; one that cannot be is a doubt."""
+    there once and unchanged; one that cannot be is a doubt - the edits of
+    marks alone (N5) one doubt a page, with the count of their marks (the
+    stitch re-rendered the rows of scans 527, 528 and 536 of the 609-page
+    book into scan 522's HTML table, and the 44 marks their 44 edits held
+    found no place there and left no trace, measured 2026-10-02)."""
     stitch = setting.book.pages[scan].record.get("tableStitch")
     if not isinstance(stitch, dict):
         return
@@ -1644,40 +2009,77 @@ def _moved_rows(setting: Setting, scan: int, plan: rr.Plan) -> None:
     for kind, _, detail, fields in trial.doubts:
         plan.doubts.append((kind, scan, detail, {**fields, "movedTo": host}))
     host_text = setting.texts[host]
+    unplaced: list[str] = []   # why, per edit of marks alone that found no place
+    marks = 0
     for edit in edits:
         placed = _on_host(setting, scan, host, before, block, host_text, edit)
         if isinstance(placed, str):
             names = list(edit.evidence.get("runs") or edit.evidence.get("lines") or [])
-            plan.doubts.append(("run-no-place", scan,
-                                f"rows moved into page {host}'s table: {placed}; runs {names}"[:220], {"movedTo": host}))
+            if names:
+                plan.doubts.append(("run-no-place", scan,
+                                    f"rows moved into page {host}'s table: {placed}; runs {names}"[:220], {"movedTo": host}))
+            else:
+                unplaced.append(placed)
+                marks += len([t for t in tokens(edit.after, "page") if t.kind == MARK]) \
+                    - len([t for t in tokens(before[edit.start:edit.end], "page") if t.kind == MARK])
         else:
-            plan.edits.append(placed)
+            plan.edits.extend(placed)
+    if unplaced:
+        plan.doubts.append(("run-no-place", scan,
+                            f"rows moved into page {host}'s table: {marks} table mark(s) both engines read that the rows lack, "
+                            f"in {len(unplaced)} gap(s), not written: {'; '.join(sorted(set(unplaced)))}"[:220],
+                            {"movedTo": host, "marks": marks, "gaps": len(unplaced)}))
 
 
 def _on_host(setting: Setting, scan: int, host: int, before: str, block: tuple[int, int], host_text: str,
-             edit: re_.Edit) -> re_.Edit | str:
-    """EDIT, proposed on SCAN's text BEFORE its rows moved, as an edit of
-    the page HOST that holds the rows now; else why not."""
+             edit: re_.Edit) -> list[re_.Edit] | str:
+    """EDIT, proposed on SCAN's text BEFORE its rows moved, as edits of the
+    page HOST that holds the rows now; else why not.  An edit that changes
+    two lines which do not stand together on the host (the move drops the
+    rule under the continuation's first row, which the gap between its
+    first two rows holds) is made line by line, all of it or none."""
     old, new = before[edit.start:edit.end], edit.after
+    placed = _host_edit(setting, scan, host, before, block, host_text, edit, edit.start, old, new)
+    if not isinstance(placed, str):
+        return [placed]
+    if "\n" not in old or old.count("\n") != new.count("\n"):
+        return placed
+    parts: list[re_.Edit] = []
+    at = edit.start
+    for old_line, new_line in zip(old.split("\n"), new.split("\n")):
+        if old_line != new_line:
+            part = _host_edit(setting, scan, host, before, block, host_text, edit, at, old_line, new_line)
+            if isinstance(part, str):
+                return part
+            parts.append(part)
+        at += len(old_line) + 1
+    return parts
+
+
+def _host_edit(setting: Setting, scan: int, host: int, before: str, block: tuple[int, int], host_text: str,
+               edit: re_.Edit, at: int, old: str, new: str) -> re_.Edit | str:
+    """BEFORE's text OLD at AT becoming NEW (EDIT, or a line of it), as an
+    edit of the page HOST; else why not."""
     lead = 0
     while lead < min(len(old), len(new)) and old[lead] == new[lead]:
         lead += 1
     trail = 0
     while trail < min(len(old), len(new)) - lead and old[len(old) - 1 - trail] == new[len(new) - 1 - trail]:
         trail += 1
-    start, end, after = edit.start + lead, edit.end - trail, new[lead:len(new) - trail]
+    start, end, after = at + lead, at + len(old) - trail, new[lead:len(new) - trail]
     line_start = before.rfind("\n", 0, start) + 1
     line_end = before.find("\n", end)
     line_end = len(before) if line_end < 0 else line_end
     if line_start < block[0] or line_end > block[1]:
         return "the place is not in the rows moved"
     lines = before[line_start:line_end]
-    at = host_text.find(lines)
-    if at < 0 or host_text.find(lines, at + 1) >= 0:
+    here = host_text.find(lines)
+    if here < 0 or host_text.find(lines, here + 1) >= 0:
         return "the rows do not stand there once and unchanged"
-    if (at and host_text[at - 1] != "\n") or (at + len(lines) < len(host_text) and host_text[at + len(lines)] != "\n"):
+    if (here and host_text[here - 1] != "\n") \
+            or (here + len(lines) < len(host_text) and host_text[here + len(lines)] != "\n"):
         return "the rows do not stand there once and unchanged"
-    host_start = at + start - line_start
+    host_start = here + start - line_start
     host_end = host_start + end - start
     if written_in(setting.mask, host, host_start, host_end):
         return "a model answer wrote here"
@@ -1731,19 +2133,30 @@ def _whole_lines(page: PageRuns, gap: Gap, lines: Sequence[Sequence[Token]], pla
         # and differ in some of the whole lines only, the others are written.
         a_lines, b_lines = _lines_of(gap.a), _lines_of(gap.b)
         at = {id(seg[0]): n for n, seg in enumerate(a_lines) if seg}
-        apart = [n for n in range(len(a_lines)) if fused(a_lines[n]) != fused(b_lines[n])] \
+        apart = [n for n in range(len(a_lines)) if loose(a_lines[n]) != loose(b_lines[n])] \
             if len(a_lines) == len(b_lines) else None
         numbers = [at[id(seg[0])] for seg in whole]
+        if apart is not None:
+            # Lines that differ in hyphens or apostrophes only are written as
+            # engine A reads them (nearly), the two readings on record.
+            near = [n for n in range(len(a_lines)) if n not in apart and fused(a_lines[n]) != fused(b_lines[n])]
+            if near:
+                plan.doubts.append(("run-engines-differ", scan,
+                                    _gap_detail(page, gap, f"{len(near)} whole line(s) hyphens or apostrophes apart; "
+                                                           "written as engine A reads them"),
+                                    {"engineA": [line_text(a_lines[n]) for n in near],
+                                     "engineB": [line_text(b_lines[n]) for n in near], "written": "A"}))
         if apart is None or len(apart) >= len(whole) or any(n not in numbers for n in apart):
             plan.doubts.append(("run-engines-differ", scan, _gap_detail(page, gap, "whole lines"),
                                 {"engineA": texts, "engineB": show("".join(t.raw for t in gap.b), 200)}))
             return
-        plan.doubts.append(("run-engines-differ", scan,
-                            _gap_detail(page, gap, f"{len(apart)} of {len(whole)} whole lines, left out"),
-                            {"engineA": [line_text(a_lines[n]) for n in apart],
-                             "engineB": [line_text(b_lines[n]) for n in apart]}))
-        lines = [seg for seg, n in zip(whole, numbers) if n not in apart]
-        texts = [line_text(seg) for seg in lines]
+        if apart:
+            plan.doubts.append(("run-engines-differ", scan,
+                                _gap_detail(page, gap, f"{len(apart)} of {len(whole)} whole lines, left out"),
+                                {"engineA": [line_text(a_lines[n]) for n in apart],
+                                 "engineB": [line_text(b_lines[n]) for n in apart]}))
+            lines = [seg for seg, n in zip(whole, numbers) if n not in apart]
+            texts = [line_text(seg) for seg in lines]
     if answered(gap.start, gap.end):
         plan.doubts.append(("run-no-place", scan, _gap_detail(page, gap, "a model answer wrote here"), {"lines": texts}))
         return
@@ -1955,7 +2368,7 @@ def _edges(text: str, edit: re_.Edit) -> list[str]:
 def runs(book: Any, model: Mapping[str, Any], ledger: re_.Ledger, order: Sequence[int],
          apply: Callable[[Sequence[re_.Edit]], None], facts: rr.BookFacts | None = None,
          labels: Mapping[int, str] | None = None) -> rr.Plan:
-    """The stage: N4 and R1 applied through APPLY, then N1, N3 and N2
+    """The stage: N4 and R1 applied through APPLY, then N1, N5, N3 and N2
     proposed on the text they leave (and checked against the finalize
     contract at the page edges)."""
     facts = facts or rr.book_facts(book, model)

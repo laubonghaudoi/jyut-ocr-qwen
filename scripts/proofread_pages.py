@@ -3033,6 +3033,10 @@ def reading_nearby(left_out: str, before: str, after: str, window: int = NEARBY_
 # 裁決 answer repeats may stand for --neighbour-guard to take the answer for a
 # copy of it (neighbour_copy): 1 is the character right beside the spot.
 NEIGHBOUR_WINDOW = 2
+# The shortest one-engine reading that, written right beside its own copy,
+# is doubted as a line read twice (beside_copies): shorter stretches repeat
+# in print (個個, 年年, a table's zeros).
+BESIDE_COPY_MIN = 6
 
 
 def neighbour_copy(answer: str, reading_a: str, reading_b: str, before: str, after: str,
@@ -4374,16 +4378,98 @@ def furniture_row(table: "_tables.Table", heads: Sequence[str] = (),
     return None
 
 
+# A second reading of a grid vouches for it when the two agree cell for cell:
+# at most this share of the cells holding CJK may differ, and a differing pair
+# must be the same cell read with a character or two apart (vouched_grid).
+VOUCH_CELLS_DIFFER = 0.1
+VOUCH_CELL_DISTANCE = 2
+
+
+def vouched_grid(table: "_tables.Table", witness: str | None) -> tuple["_tables.Table | None", str]:
+    """Engine B's own grid of TABLE, when it agrees with engine A's, else None
+    and why not.
+
+    HunyuanOCR writes a table it reads as HTML too, so a page often holds two
+    independent readings of one grid.  They agree when the two grids have the
+    same rows and columns, lay their merged cells the same way, and read the
+    same characters at every position (a merged cell's text repeated into every
+    slot it covers; a cell with no CJK by its letters and digits): the layout -
+    a rowspan, a colspan, a cell wrapped onto two lines - is then not one
+    engine's word but both.  Up to VOUCH_CELLS_DIFFER of the cells holding
+    text may differ by a character or two (a variant sort, a
+    character one engine dropped - 張翀/張狒, 正德十一年至十三年/正德十一至十三年
+    on the modern book): those are the same cell read apart, and the merge
+    settles the characters; anything further - a cell shifted into its
+    neighbour, a column the other engine never cut - is a different grid, and
+    so is any difference in a slot a merged cell covers (an empty slot where
+    engine A spans: engine B saw no merge there).  Engine B writing the
+    merged cell's text in every slot it covers agrees with the merge: that is
+    how a reader without rowspans writes one.
+    Measured on the one modern book (609 pages, 30 engine A grids refused,
+    1,450 figures in them that the rebuild from bare characters lost): engine
+    B's grid vouches for 9 - 6 refused for a cell line break, 3 for merged
+    cells, 326 figures; on 13 engine B wrote no grid of the same shape and on 7
+    its grid differs further (a row shifted into its neighbours' cells, the
+    same cell wrapped), and those 20 stay refused.
+    """
+    if not witness or "<table" not in witness:
+        return None, "engine B wrote no grid"
+    def key(text: str) -> str:
+        # A cell's characters; one with no CJK (a year, a page reference, a
+        # name in Latin letters) by its letters and digits, so that a figure
+        # standing in another slot is a difference and a dash's width is not.
+        return CJK(text) or "".join(ch for ch in text if ch.isalnum())
+
+    keyed = [[key(text) for text in row] for row in table.grid(fill_spans=True)]
+    # The slots a merged cell covers: there the other reading must agree to
+    # the character, since the merge is what is being vouched for.
+    covered = {(r, k) for cell in table.cells if cell.rowspan > 1 or cell.colspan > 1
+               for r in range(cell.row, cell.row + cell.rowspan) for k in range(cell.col, cell.col + cell.colspan)}
+    nearest: tuple[int, str] | None = None
+    for match in re.finditer(r"<table\b.*?</table>", witness, flags=re.S | re.I):
+        other = _tables.parse_html_table(match.group(0), source_breaks=True)
+        if other is None:
+            continue
+        other = _tables.simplify(other)
+        if (other.rows, other.cols) != (table.rows, table.cols):
+            note = f"engine B's grid is {other.rows} rows x {other.cols} columns"
+            nearest = nearest or (10 ** 6, note)
+            continue
+        got = other.grid(fill_spans=True)
+        holding = differing = 0
+        apart: list[str] = []
+        for r in range(table.rows):
+            for k in range(table.cols):
+                mine, theirs = keyed[r][k], key(got[r][k])
+                if not mine and not theirs:
+                    continue
+                holding += 1
+                if mine != theirs:
+                    differing += 1
+                    if (r, k) in covered or _tables._edit_distance(mine, theirs) > VOUCH_CELL_DISTANCE:
+                        apart.append(f"row {r + 1} column {k + 1} ({mine[:8] or 'empty'} / {theirs[:8] or 'empty'})")
+        if differing > max(1, int(holding * VOUCH_CELLS_DIFFER)) or apart:
+            note = (f"engine B's grid of the same shape reads {differing} of {holding} cells otherwise"
+                    + (f", e.g. {apart[0]}" if apart else ""))
+            if nearest is None or differing < nearest[0]:
+                nearest = (differing, note)
+            continue
+        return other, f"vouched by engine B's grid ({holding} cells, {differing} read a character or two apart)"
+    return None, nearest[1] if nearest else "engine B wrote no grid"
+
+
 def engine_table(html_text: str, witness: str | None = None, heads: Sequence[str] = (),
                  furniture: frozenset[str] | set[str] = frozenset()) -> tuple[str | None, str]:
     """Convert one engine <table> to page markup, or explain the refusal.
 
     Detected is not the same as correct, so this refuses more than it accepts,
-    and only what some evidence vouches for comes back - as a Markdown table,
-    since a grid with a merged cell is one of the refusals.  `witness` is the
-    other engine's text for the same page (witness_refusal); `heads` and
-    `furniture` are the running heads and recurring n-grams of the book
-    (furniture_row).
+    and only what some evidence vouches for comes back.  A grid with a cell
+    wrapped onto two lines, or with a merged cell, is refused on engine A's
+    word alone and accepted when engine B's own grid agrees with it
+    (vouched_grid) - as HTML when a cell is merged, Markdown otherwise.
+    `witness` is the other engine's text for the same page (vouched_grid,
+    witness_refusal); `heads` and `furniture` are the running heads and
+    recurring n-grams of the book (furniture_row).
     """
     if "<table" not in html_text:
         return None, "not table markup"
@@ -4413,12 +4499,27 @@ def engine_table(html_text: str, witness: str | None = None, heads: Sequence[str
     # fragments against the width of the neighbouring rows does not separate
     # them either - every row of p.71 is collapsed the same way, so the match
     # holds for 2 of its 12 collapsed cells, and also for 3 of p.261's 31
-    # wrapped cells and for p.30's corner.  So the table is refused and rebuilt
-    # from the page image.
-    broken = sum(1 for cell in table.cells if "\n" in cell.text or "\\n" in cell.text)
+    # wrapped cells and for p.30's corner.  What does separate them is engine
+    # B's own grid: a collapsed cell is a column the other engine cut, and the
+    # grids differ; a wrapped cell is one both read as one cell, with engine B
+    # writing it on one line.  So the table is refused and rebuilt from the
+    # page image unless engine B's grid vouches for it (vouched_grid), and
+    # then the break is the cell's wrapping, written <br> (_tables.render).
+    # On the modern book, 13 grids refused here held 1,450 figures the rebuild
+    # from bare characters lost.
+    broken = [cell for cell in table.cells if "\n" in cell.text or "\\n" in cell.text]
+    vouched: "_tables.Table | None" = None
+    vouch_note = ""
     if broken:
-        return None, (f"{broken} cell(s) hold line breaks - the cell's own text wrapping, or "
-                      "several columns collapsed into one cell, which the grid cannot tell apart")
+        vouched, vouch_note = vouched_grid(table, witness)
+        if vouched is None or any(
+                "\n" in other.text or "\\n" in other.text for other in vouched.cells
+                if any((other.row, other.col) == (cell.row, cell.col) for cell in broken)):
+            why = ("engine B's grid wraps the same cell" if vouched is not None else vouch_note)
+            return None, (f"{len(broken)} cell(s) hold line breaks - the cell's own text wrapping, or "
+                          f"several columns collapsed into one cell, which the grid cannot tell apart; {why}")
+        # The engine's literal backslash-n is the cell's line break from here on.
+        table = _tables.with_texts(table, [cell.text.replace("\\n", "\n") for cell in table.cells])
     # The engine's merged cells are not evidence of the page's.  Of the six
     # engine tables in the corpus whose grid keeps a merged cell after
     # simplify, every one places a merge wrong against the page (checked on the
@@ -4426,17 +4527,23 @@ def engine_table(html_text: str, witness: str | None = None, heads: Sequence[str
     # printed outside its frame as a full-height column, row labels as
     # full-height columns, a year heading split one column off, sub-headings
     # put under the next column.  The one right merge, a diagonal corner cell,
-    # sits in a grid garbled elsewhere.  Nothing independent - no second
-    # reading of the grid - vouches for a rowspan or colspan, and enforcing one
-    # would overwrite the formatter's own reading of the image, so the table
-    # goes back to the formatter to be rebuilt from the image as HTML.
+    # sits in a grid garbled elsewhere.  On the engine's word alone nothing
+    # vouches for a rowspan or colspan, and enforcing one would overwrite the
+    # formatter's own reading of the image, so the table goes back to the
+    # formatter to be rebuilt from the image as HTML - unless the second
+    # reading of the grid, engine B's own, lays the merged cells the same way
+    # and reads the same characters in every slot (vouched_grid): then the
+    # merge is two engines' word, and the grid stands as HTML.
     merged = [cell for cell in table.cells if cell.rowspan > 1 or cell.colspan > 1]
     if merged:
-        first = merged[0]
-        return None, (f"merged layout unverified: {len(merged)} merged cell(s), e.g. row "
-                      f"{first.row + 1} column {first.col + 1} ({CJK(first.text)[:10] or 'empty'}, "
-                      f"{first.rowspan} row(s) x {first.colspan} column(s)); nothing but the "
-                      "engine vouches for the merge")
+        if vouched is None:
+            vouched, vouch_note = vouched_grid(table, witness)
+        if vouched is None:
+            first = merged[0]
+            return None, (f"merged layout unverified: {len(merged)} merged cell(s), e.g. row "
+                          f"{first.row + 1} column {first.col + 1} ({CJK(first.text)[:10] or 'empty'}, "
+                          f"{first.rowspan} row(s) x {first.colspan} column(s)); nothing but the "
+                          f"engine vouches for the merge ({vouch_note})")
     # The evidence checks: every one that fails is reported, so the sealed
     # record shows the whole case against the grid, not the first symptom.
     evidence: list[str] = []
@@ -4464,7 +4571,10 @@ def engine_table(html_text: str, witness: str | None = None, heads: Sequence[str
                         "reading holds")
     if evidence:
         return None, "; ".join(evidence)
-    return _tables.render(table), f"{table.rows} rows x {table.cols} columns"
+    note = f"{table.rows} rows x {table.cols} columns"
+    if vouched is not None:
+        note += f"; {len(broken)} wrapped cell(s), {len(merged)} merged cell(s), {vouch_note}"
+    return _tables.render(table), note
 
 
 def load_blocks(draft_json: Path | None) -> list[dict[str, Any]]:
@@ -5378,6 +5488,11 @@ def table_brackets(table_text: str, sources: Sequence[str]) -> tuple[str, dict[s
     return (_tables.render_html(fixed) if table.kind == "html" else _tables.render_markdown(fixed)), done
 
 
+# A note marker as an engine writes it inside a table cell: a LaTeX or HTML
+# superscript, or a run of circled figures (recover_tables).
+CELL_NOTE_MARKER = re.compile(r"\$\s*\^\{[^$]{1,12}\}\s*\$|<sup>[^<]{1,8}</sup>|[\u2460-\u2473\u3251-\u325f\u32b1-\u32bf\u24ea-\u24ff]+")
+
+
 def recover_tables(
     blocks: Sequence[Mapping[str, Any]], resolved: str,
     render_bytes: bytes | None = None, client: "Client | None" = None,
@@ -5469,6 +5584,16 @@ def recover_tables(
             rejected.append({"block": layout,
                              "reason": "table text not found in the merged text"})
             continue
+        markers = CELL_NOTE_MARKER.findall(restated)
+        if markers:
+            # A note marker in a cell is engine A's reading and nothing checks
+            # it: the modern book prints circled three-figure note numbers
+            # (199, 200) that engine A wrote as ①⑨ and ②⑩ and engine B as ⑲
+            # and ⑳ (checked against the page images, 2 of 8 vouched rows).
+            sealed["doubts"].append({"kind": "table-note-marker-unverified", "detail": (
+                f"TABLE NOTE MARKERS UNVERIFIED: block {layout}: {len(markers)} note marker(s) in its cells as "
+                f"engine A read them ({'、'.join(m.strip() for m in markers[:6])}{'…' if len(markers) > 6 else ''}); "
+                "a circled number above 20 is often misread")})
         if render_bytes is not None and client is not None:
             restated, how = orient_table(restated, render_bytes, client, max_tokens)
             orientations.append(f"block {layout}: {how}")
@@ -7511,7 +7636,7 @@ def round4_split(output: Path, rewritten: Collection[int], expect: Mapping[str, 
     if len(states) > 1:
         # The sealed pages disagree among themselves already: no run resumes
         # them all.
-        return ("the sealed pages in " + str(output) + " were decided with the round-4 fixes set in "
+        return ("the sealed pages in " + str(output) + " were decided with the on-by-default switches set in "
                 + str(len(states)) + " ways: "
                 + "; ".join(f"pages {page_spans(pages)} with "
                             + (", ".join(names(state)) or "none of " + ", ".join(ROUND4_DEFAULTS)) + " on"
@@ -8146,6 +8271,9 @@ OPTIONAL_PROVENANCE = ("tieBreak", "censusConfirmsEngineA", "folioFurniture", "t
                        "keepArabicNumerals", "loopDetector", "neighbourGuard")
 # Switch --learned-heads (learned_heads_seal).
 OPTIONAL_PROVENANCE += ("learnedHeads",)
+# Switches --engine-a-confirms-first-answer and --census-skip-over-ceiling
+# (punctuate_part).
+OPTIONAL_PROVENANCE += ("engineAConfirmsFirstAnswer", "censusSkipOverCeiling")
 # The round-4 fixes, on by default since the user's decision of 2026-09-30
 # (after the round-4 benchmark), each with the provenance key it seals when
 # on.  --no-<switch> turns one off; the switch itself is still accepted (it
@@ -8161,6 +8289,13 @@ OPTIONAL_PROVENANCE += ("learnedHeads",)
 # decided under the new defaults.
 ROUND4_DEFAULTS = {"--keep-arabic-numerals": "keepArabicNumerals", "--loop-detector": "loopDetector",
                    "--neighbour-guard": "neighbourGuard", "--learned-heads": "learnedHeads"}
+# The punctuation pass's two uses of engine A's marks as a witness
+# (punctuate_part, which gives the measurements on sealed passes), on by
+# default: later than round 4, but resumed by the same rule - sealed when on,
+# absent when off, a book decided one way throughout - so a book begun before
+# them resumes with their two --no-* switches as well.
+ROUND4_DEFAULTS.update({"--engine-a-confirms-first-answer": "engineAConfirmsFirstAnswer",
+                        "--census-skip-over-ceiling": "censusSkipOverCeiling"})
 
 
 def decision_provenance(arguments: Any) -> dict[str, str]:
@@ -8288,6 +8423,15 @@ def decision_provenance(arguments: Any) -> dict[str, str]:
         # when on.
         **({"neighbourGuard": f"window={NEIGHBOUR_WINDOW}"} if getattr(arguments, "neighbour_guard", False)
            else {}),
+        # Switch --engine-a-confirms-first-answer: a first answer outside the
+        # count whose marks are engine A's is kept, not asked again
+        # (first_answer_confirmed).  Only when on.
+        **({"engineAConfirmsFirstAnswer": "on"} if getattr(arguments, "engine_a_confirms_first_answer", False)
+           else {}),
+        # Switch --census-skip-over-ceiling: the census not asked where
+        # engine A's marks alone are above its ceiling (punctuate_part).
+        # Only when on.
+        **({"censusSkipOverCeiling": "on"} if getattr(arguments, "census_skip_over_ceiling", False) else {}),
         # Switch --learned-heads: the running head learned by place, sealed by
         # what was learned (learned_heads_seal), so a page sealed under another
         # book's evidence or another profile's is not current.  Only when on.
@@ -8528,6 +8672,12 @@ def notation_hint(arguments: Any) -> str:
     return ("\n".join(lines) + "\n") if lines else ""
 
 
+# What a pass's reason ends with when its first answer, outside the census
+# by more than the tolerance, was kept with no retry because its marks are
+# engine A's (--engine-a-confirms-first-answer; first_answer_confirmed).
+FIRST_ANSWER_KEPT = " (first answer kept: its marks are engine A's)"
+
+
 def census_tolerance(census: int) -> int:
     """How far the marks written may stray from the census and still match it.
 
@@ -8649,6 +8799,10 @@ OPENING_MARKS = frozenset("（「『《〈")
 DASH_MARKS = "—"
 # Markup in an engine's gap (HTML tags and entities): not print.
 GAP_MARKUP = re.compile(r"<[^>]*>|&[A-Za-z0-9#]+;")
+# LaTeX's inline-math delimiters, as an engine writes them around a note
+# marker (\(^{⑩}): markup too, where MARK_FORMS would take the ASCII bracket
+# for a printed one (engine_a_witness).
+LATEX_DELIMITERS = re.compile(r"\\[()]")
 
 
 def dash_runs(text: str) -> int:
@@ -9019,6 +9173,112 @@ def engine_a_confirmed(span: str, kept: tuple[Sequence[str], bool] | None, censu
     return text, places
 
 
+def engine_a_witness(text: str, segments: Sequence[Mapping[str, Any]], pieces: Sequence[str],
+                     blocks: Sequence[Mapping[str, Any]] = ()
+                     ) -> tuple[tuple[list[str], list[str]], list[int | None]] | None:
+    """Engine A's printed marks as a witness of a punctuation pass
+    (--engine-a-confirms-first-answer, --census-skip-over-ceiling): the marks
+    of the vocabulary (PUNCT_MARKS; vertical forms and ASCII brackets as
+    MARK_FORMS folds them) tied to the merged text's characters as
+    engine_marks_merged ties them (tied_marks, for gaps_of), with the markup
+    in engine A's gaps left out first - HTML tags and entities (GAP_MARKUP)
+    and LaTeX's delimiters (LATEX_DELIMITERS), whose bracket is no printed
+    one; a note marker, a digit or a letter is no mark of the vocabulary and
+    was never counted - and, for each character of the merged text, which of
+    engine A's characters stands there in an exact place (engine_places;
+    None where none does).  None when the segments do not spell engine A's
+    text.
+
+    The punctuator is never shown engine A's marks (its text is the merged
+    characters alone), so the two are independent readings of the same
+    print."""
+    chars, gaps = engine_gaps(text)
+    found = engine_places(chars, segments, pieces, blocks)
+    if found is None:
+        return None
+    place, m = found
+    gaps = [LATEX_DELIMITERS.sub("", GAP_MARKUP.sub("", gap)) for gap in gaps]
+    _, marks = anchored_marks("".join(gap + char for gap, char in zip(gaps, chars)) + gaps[-1])
+    own: list[int | None] = [None] * m
+    for index, at in place.items():
+        own[at] = index
+    return tied_marks(m, marks, place), own
+
+
+def engine_a_stretch(own: Sequence[int | None], start: int, length: int) -> bool:
+    """Whether the merged text's stretch [START, START + LENGTH) is, character
+    for character, a stretch of engine A's own reading (OWN, from
+    engine_a_witness): every character in an exact place, and the places
+    consecutive.  Then every mark engine A wrote between two of the stretch's
+    characters is tied to one of them, and the marks engine A's witness
+    holds at the stretch's gaps are all the marks engine A read there: none
+    was dropped with a character the merge replaced or left out, and none
+    stands beside a character engine A did not read (engine_marks_kept says
+    why such a mark has no sure place)."""
+    stretch = own[start:start + length]
+    return (length > 0 and len(stretch) == length and stretch[0] is not None
+            and all(index == stretch[0] + k for k, index in enumerate(stretch)))
+
+
+def gap_marks(gap: str) -> str:
+    """One gap's marks as two readings are compared (first_answer_confirmed):
+    ●, ⦿ and ◉ one bullet (BULLET_SHAPES, the user's ruling) and a run of
+    leader dots 「……」 whatever its number of dots (leaders_written, D4)."""
+    return leaders_written(gap.translate(BULLET_SHAPES))
+
+
+def first_answer_confirmed(span: str, answer: str, witness: tuple[Sequence[str], bool] | None,
+                           doubled: bool) -> bool:
+    """Whether ANSWER, a punctuation answer that kept SPAN's characters, wrote
+    exactly engine A's marks (--engine-a-confirms-first-answer): WITNESS is
+    engine A's marks at SPAN's gaps (engine_a_witness, gaps_of) and whether
+    SPAN is a stretch of engine A's own reading (engine_a_stretch).
+
+    Equal means: at every one of SPAN's len(SPAN) + 1 gaps, the answer's
+    marks of the vocabulary, tied to SPAN's characters as engine A's are
+    (anchored_marks: an opening mark with the character after it, any other
+    with the character before; vertical forms and ASCII brackets folded by
+    MARK_FORMS), are the same string as engine A's there - the same marks,
+    as many of each, in the order written on each side of the gap - with
+    the three bullets one shape and a run of leader dots one mark
+    (gap_marks).  What an answer writes that is no mark of the vocabulary
+    (a figure, a note marker, 〔〕) is not compared, as nothing else in the
+    pass looks at it.  Never equal:
+
+    - where SPAN is not engine A's own stretch (a character only engine B
+      read, or one the merge replaced at another length, stands in it):
+      engine A's marks there may be incomplete or a character off;
+    - where engine A wrote no mark in SPAN: it read no punctuation there,
+      which is no evidence that none is printed (measured on the benchmark
+      books' sealed passes: on one column group engine A read none of the
+      33 places the census counted); or one mark only, which an answer can
+      match by chance;
+    - where the book prints doubled circles (DOUBLED: the profile, the
+      census on this crop or the answer itself) and engine A wrote a single
+      circle: engine A's 。 does not say whether one circle or two is
+      printed (agreed_punctuation)."""
+    if witness is None:
+        return False
+    theirs, own = witness
+    if not own or len(theirs) != len(span) + 1 or CJK(span) != span or not any(theirs):
+        return False
+    chars, marks = anchored_marks(answer)
+    if chars != span:
+        return False
+    if doubled and any(gap.count("。") == 1 for gap in theirs):
+        return False
+    # One mark is no reading of the stretch's punctuation to agree with: an
+    # answer that wrote one mark where engine A wrote one is kept on the
+    # count's word only when the two also agree on where (the count's
+    # tolerance sees to the rest).  Found by the review's probe, not on any
+    # sealed book: a lazy answer with one 。 at the end of a span where
+    # engine A read only that 。 would be kept outside the count.
+    if mark_places("".join(gap + char for gap, char in zip(theirs, span)) + theirs[-1]) < 2:
+        return False
+    ours = gaps_of(tied_marks(len(span), marks, {k: k for k in range(len(span))}))
+    return all(gap_marks(mine) == gap_marks(other) for mine, other in zip(ours, theirs))
+
+
 def tile_edge_join(trailing: str, leading: str) -> str:
     """LEADING, the marks one pass wrote before its stretch's first character,
     without the marks TRAILING - what the pass before it wrote after its last
@@ -9326,7 +9586,8 @@ def agreed_readings(block_span: str, first: tuple[str, Sequence[int]], second: t
 def punctuate_part(client: "Client", arguments: Any, crop: bytes | None, span: str, hint: str,
                    limit: float, printed: Sequence[str] | None = None,
                    block: tuple[str, int, int, int] | None = None,
-                   kept: tuple[Sequence[str], bool] | None = None
+                   kept: tuple[Sequence[str], bool] | None = None,
+                   witness: tuple[Sequence[str], bool] | None = None
                    ) -> tuple[str, dict[str, Any], list[dict[str, Any]]]:
     """Census then punctuation for one block or column group, against its crop.
 
@@ -9371,6 +9632,45 @@ def punctuate_part(client: "Client", arguments: Any, crop: bytes | None, span: s
     confirms them (engine_a_confirmed) they are the pass's answer, and the
     punctuate call - with its retry and shape call - is not made
     (engineAKept).  The census is still asked.
+
+    WITNESS is engine A's printed marks at SPAN's gaps, its markup left out,
+    and whether SPAN is a stretch of engine A's own reading (engine_a_witness,
+    engine_a_stretch).  The punctuator never sees these marks, so they are an
+    independent reading of the same print, and two switches use them (both on
+    by default; ROUND4_DEFAULTS):
+
+    - --census-skip-over-ceiling: where engine A's marks hold more places
+      (mark_places) than the largest census believed for SPAN
+      (census_ceiling), the census is not asked: a count of the same print
+      would be above the ceiling and discarded.  The pass goes on as after a
+      discarded census (census unknown: no count told, no count gate), and
+      records censusNotAsked (the rule, engine A's places, the ceiling).
+      Measured on the sealed passes of one horizontally set book with many
+      footnotes (4,398 passes, 1,603 with the census discarded; engine A's
+      text of the block, no model call): the rule is met on 68 passes, and
+      on all 68 the census asked had been discarded (none had stood); the
+      other 1,535 discarded censuses it does not foresee.  On the 2,554
+      sealed passes of eight older books (one whole vertically set book and
+      the benchmark's pages) it is met on none.
+    - --engine-a-confirms-first-answer: a first answer that keeps SPAN's
+      characters on its own stretch and is outside the census by more than
+      the tolerance is kept, with no retry, when its marks are exactly
+      engine A's (first_answer_confirmed): two independent readings wrote
+      the same marks at every gap, and the count is the one that differs.
+      The record keeps the count's reason and says firstAnswerKept, and the
+      seal still doubts the count (punctuation_doubts).  Measured on the same
+      book's sealed passes (the sealed first answers put to
+      first_answer_confirmed, engine A's text of the block aligned to their
+      characters; no model call): of 427 first answers refused on the count
+      alone, 326 wrote exactly engine A's marks; the retry asked after them
+      was kept on its characters alone (the count is not asked of a retry)
+      and wrote the same number of places in 287 of the 320 kept (after the
+      other 6 both answers were refused); where a kept retry differed from
+      its first answer, every case checked against the page image had the
+      first answer right (a comma not printed added, 《》 turned into 〈〉, a
+      year the first answer had written left out).  On the eight older
+      books (10 first answers refused on the count) it keeps none: no such
+      answer wrote engine A's marks.
     """
     used: list[dict[str, Any]] = []
     positions = not getattr(arguments, "no_doubled_census", False)
@@ -9397,16 +9697,38 @@ def punctuate_part(client: "Client", arguments: Any, crop: bytes | None, span: s
     # image gates the pass (zero printed -> nothing to add) and checks its
     # output; measured without it, an unpunctuated 1910 report came back with
     # 。and ，throughout.
-    census_text, m = client.ask_answering(
-        vocabulary_prompt(CENSUS_SYSTEM if positions else CENSUS_SYSTEM_GLYPHS, arguments),
-        "數清楚呢個 block 印咗幾多個標點符號。", crop, arguments.max_tokens, kind="census")
-    used.append(m)
+    ceiling = census_ceiling(arguments, len(CJK(span)))
+    not_asked = None
+    # Engine A's places, counted on the span with its marks written in, as
+    # mark_places counts an answer: the gap strings joined would put two
+    # single circles at neighbouring gaps side by side (one doubled circle),
+    # and never count a run of leader dots that opens the string (measured
+    # on the review's probes: 甲。乙。丙。丁。戊。 counted 3 of 5, six bullets
+    # at six gaps 1, 甲……乙……丙 0).
+    engine_a_places = (mark_places("".join(gap + char for gap, char in zip(witness[0], span)) + witness[0][-1])
+                       if witness is not None and len(witness[0]) == len(span) + 1 else None)
+    if getattr(arguments, "census_skip_over_ceiling", False) and engine_a_places is not None and (
+            engine_a_places > ceiling):
+        # --census-skip-over-ceiling: engine A alone read more places here
+        # than the largest census believed, so a count of the same print
+        # would be discarded below.  Not asked; unknown, as a discarded one,
+        # except that no censusShapes is sealed (there was no answer to take
+        # them from), and a count that would have stood - zero, or within the
+        # ceiling where engine A over-read - is never seen (0 of 68 passes on
+        # the one modern book measured; none fired on eight older books).
+        not_asked = {"rule": "engine-a-over-ceiling", "engineAPlaces": engine_a_places, "ceiling": ceiling}
+        census_text = ""
+    else:
+        census_text, m = client.ask_answering(
+            vocabulary_prompt(CENSUS_SYSTEM if positions else CENSUS_SYSTEM_GLYPHS, arguments),
+            "數清楚呢個 block 印咗幾多個標點符號。", crop, arguments.max_tokens, kind="census")
+        used.append(m)
     census = parse_census(census_text)
     doubled_census = parse_census(census_text, DOUBLED_LINE) if positions else None
     # The shapes the census saw, as it wrote them: evidence for a bullet's
     # shape (bullet_contradicted).
     shape_line = SHAPE_LINE.search(census_text or "")
-    if census is not None and census + (doubled_census or 0) > census_ceiling(arguments, len(CJK(span))):
+    if census is not None and census + (doubled_census or 0) > ceiling:
         # More marks than this book ever prints per character is not a count of
         # marks (measured: 178 for a 430-character block - it counted
         # characters). Unknown, not zero.
@@ -9415,6 +9737,8 @@ def punctuate_part(client: "Client", arguments: Any, crop: bytes | None, span: s
         "censusConvention": "glyphs"}
     if shape_line and any(c in PUNCT_MARKS or c in BULLET_MARKS for c in shape_line.group(1)):
         counted["censusShapes"] = shape_line.group(1).strip()[:40]
+    if not_asked is not None:
+        counted["censusNotAsked"] = not_asked
     if leaders is not None:
         counted["leaderCensus"] = leaders
     if leaders and census is not None and census < leaders:
@@ -9450,11 +9774,28 @@ def punctuate_part(client: "Client", arguments: Any, crop: bytes | None, span: s
     first_read = ((out, realigned["read"] if realigned else [block[1], block[2]])
                   if ok_p and block is not None else None)
     agreement = None
+    first_kept = False
     if ok_p and census is not None:
         places = mark_places(out, positions)
         if abs(places - census) > census_tolerance(census):
-            ok_p, reason_p = False, (f"{places} places marked but {census} counted on the page" if positions
-                                     else f"{places} marks written but {census} counted on the page")
+            reason_p = (f"{places} places marked but {census} counted on the page" if positions
+                        else f"{places} marks written but {census} counted on the page")
+            # --engine-a-confirms-first-answer: refused by the count alone,
+            # on its own stretch, and its marks are exactly engine A's - two
+            # independent readings against one count.  Kept, not asked again;
+            # the reason stays, and the seal doubts the count as it does a
+            # kept retry's (punctuation_doubts).  Doubled circles: this
+            # book's profile, the census on this crop, or the answer itself.
+            first_kept = (
+                realigned is None and getattr(arguments, "engine_a_confirms_first_answer", False)
+                and first_answer_confirmed(
+                    span, out, witness,
+                    bool(profile_section(arguments, "notation").get("doubled")) or "。。" in out
+                    or bool(doubled_census)))
+            if first_kept:
+                reason_p += FIRST_ANSWER_KEPT
+            else:
+                ok_p = False
     # Kept when refused: a refused pass leaves its text bare, and without the
     # output nobody can tell a wrong refusal from a right one afterwards.
     refused = [] if ok_p else [answered]
@@ -9480,6 +9821,8 @@ def punctuate_part(client: "Client", arguments: Any, crop: bytes | None, span: s
                 # what it and the first answer agree on (agreed_readings).
                 agreement = agreed_readings(block[0], first_read, (kept_retry, realigned_retry["read"]))
     record = {"ok": ok_p, "census": census, "reason": reason_p, **counted, **first}
+    if first_kept:
+        record["firstAnswerKept"] = "engine-a-marks"
     if ok_p and refused:
         # The first answer, refused, when the retry was kept: sealed too, so
         # a retry far off the census can be audited against it.
@@ -12688,7 +13031,12 @@ def punctuation_doubts(passes: Sequence[Mapping[str, Any]]) -> list[dict[str, st
         if census == 0:
             continue
         why = (f" (first answer refused: {reason.replace(' (after retry)', '')})"
-               if kept_by == "a retry" else "")
+               if kept_by == "a retry"
+               # --engine-a-confirms-first-answer: kept outside the count,
+               # and why (first_answer_confirmed).
+               else " (the first answer, kept with no retry: its marks are engine A's"
+               + (", then replaced by the shape re-check)" if (first.get("shapeRetry") or {}).get("kept") else ")")
+               if shape == "pass" and first.get("firstAnswerKept") else "")
         doubled = (first.get("doubled") or 0) if shape == "pass" else 0
         convention = first.get("censusConvention") if shape == "pass" else "glyphs"
         # The census counts places (a doubled circle is one, and so is a
@@ -14502,6 +14850,7 @@ def proofread_page(
         unconfirmed: list[str] = []
         # Answers --neighbour-guard did not write: copies of the text beside their spot.
         neighbour_copies: list[str] = []
+        beside_copies: list[str] = []
         if planned:
             with cf.ThreadPoolExecutor(page_concurrency) as pool:
                 answers = in_context(pool, adjudicate, planned)
@@ -14677,6 +15026,31 @@ def proofread_page(
                         f"{asked['after'][:4]} (裁決 wrote 「{answered}」, the text {copied['distance']} "
                         f"character(s) {copied['side']} the spot; kept engine {side.upper()}'s "
                         f"「{asked[side][:8]}」)")
+        if planned:
+            # A reading only one engine made, of some length, that 裁決 confirmed
+            # whole and that is exactly the text standing right beside the spot
+            # in the merged text (the engine read a line twice; 裁決, shown the
+            # spot between two blocks, answered the next line): written, since
+            # the answer is an engine's reading, but a doubt - the page may hold
+            # the line twice.  Not where a side stands in a furniture band: a
+            # chapter title printed in the running head and as the heading is
+            # two copies in print, and the furniture one goes later (measured on
+            # the modern book: 3 such titles, none a copy; one body line read
+            # twice by engine B on scan 33, written twice in one run of two).
+            for (slot, asked, _, _, engine, _), (_, record, _) in zip(planned, answers):
+                if record.get("resolved_from") != "adjudicator" or asked.get("furnitureSides"):
+                    continue
+                readings = [CJK(asked["a"]), CJK(asked["b"])]
+                written = CJK(pieces[slot])
+                if sum(1 for r in readings if r) != 1 or len(written) < BESIDE_COPY_MIN or written not in readings:
+                    continue
+                before, after = CJK("".join(pieces[:slot])), CJK("".join(pieces[slot + 1:]))
+                side = ("after" if after.startswith(written) else "before" if before.endswith(written) else None)
+                if side is None:
+                    continue
+                record["copyBeside"] = side
+                beside_copies.append(f"{asked['before'][-4:]}[{'A' if readings[0] else 'B'} {written[:10]}…]{asked['after'][:4]} "
+                                     f"(the same {len(written)} characters stand right {side} the spot)")
         # Decision D24: a character only engine A read, which the page's
         # verdicts judged a misread of engine A's at every site they were
         # asked about (judged_misreads), is asked about too, on its own crop,
@@ -14767,6 +15141,12 @@ def proofread_page(
                 "spot(s) only one engine read, but wrote fewer characters than that engine read; the "
                 "engine's reading is kept: " + "; ".join(partial_insertions[:6])
                 + " - count the characters against the image")})
+        if beside_copies:
+            doubts.append({"kind": "neighbour-copy", "detail": (
+                f"ONE-ENGINE READING WRITTEN BESIDE ITS OWN COPY: at {len(beside_copies)} spot(s) 裁決 confirmed a "
+                "reading only one engine made, and the same characters stand right beside the spot already; the "
+                "engine may have read the line twice: " + "; ".join(beside_copies[:6])
+                + " - check against the image whether the line is printed once or twice")})
         if neighbour_copies:
             doubts.append({"kind": "neighbour-copy", "detail": (
                 f"ANSWER COPIED FROM BESIDE THE SPOT: at {len(neighbour_copies)} spot(s) 裁決's answer (neither "
@@ -15579,6 +15959,13 @@ def proofread_page(
             a_marks_kept = (engine_marks_kept(figure_marks(draft, figures_kept) if figures_kept else draft,
                                               segments, pieces, blocks)
                             if census_confirms_on else None)
+            # --engine-a-confirms-first-answer, --census-skip-over-ceiling:
+            # engine A's printed marks as the witness of a pass
+            # (engine_a_witness), and which of its characters stands at each
+            # of the merged text's.
+            a_witness = (engine_a_witness(draft, segments, pieces, blocks)
+                         if getattr(arguments, "engine_a_confirms_first_answer", False)
+                         or getattr(arguments, "census_skip_over_ceiling", False) else None)
 
             def punctuate(item: tuple[int, int, bytes | None, int, int, bool, int]):
                 index, tile_number, crop, lo, hi, tiled, reach = item
@@ -15589,13 +15976,18 @@ def proofread_page(
                     start = span_starts[index] + lo
                     kept = (gaps_of(a_marks_kept[0], start, hi - lo),
                             not any(start + g in a_marks_kept[1] for g in range(hi - lo + 1)))
+                witness = None
+                if a_witness is not None:
+                    start = span_starts[index] + lo
+                    witness = (gaps_of(a_witness[0], start, hi - lo), engine_a_stretch(a_witness[1], start, hi - lo))
                 # The pass's place (call_site): its block, its tile and the
                 # stretch it is asked - its punctuationPasses record's range,
                 # or realigned.range where the answer read another stretch.
                 with call_site({"block": layout_index(blocks, index), "mergedOffset": span_starts[index] + lo,
                                 "range": [lo, hi], **({"tile": tile_number} if tiled else {})}):
                     return punctuate_part(client, arguments, crop, spans[index][lo:hi], hint, limit,
-                                          printed=printed, block=(spans[index], lo, hi, reach), kept=kept)
+                                          printed=printed, block=(spans[index], lo, hi, reach), kept=kept,
+                                          witness=witness)
 
             with cf.ThreadPoolExecutor(page_concurrency) as pool:
                 cuts = in_context(pool, cut, to_punctuate)
@@ -15636,6 +16028,32 @@ def proofread_page(
                                                     "for this stretch",
                         "after": out, "evidence": {"range": [lo, hi], "census": record["census"],
                                                    "places": record["places"], "dashes": record["dashes"]}})
+                if record.get("firstAnswerKept"):
+                    # --engine-a-confirms-first-answer: the first answer kept
+                    # outside the count, the punctuator not asked again (what
+                    # a retry would have written is not known).
+                    decision_changes.append({
+                        "decision": "engineAConfirmsFirstAnswer", "rule": "first-answer-engine-a-marks",
+                        "switch": "--engine-a-confirms-first-answer",
+                        "block": layout_index(blocks, index), "contextBefore": spans[index][max(0, lo - 4):lo],
+                        "contextAfter": spans[index][lo:lo + 4], "mergedOffset": span_starts[index] + lo,
+                        "before": None, "beforeBy": "not asked: without the switch the punctuator is asked again, "
+                                                    "and a retry that keeps the characters replaces this answer",
+                        "after": out, "evidence": {"range": [lo, hi], "census": record["census"],
+                                                   "places": record["places"]}})
+                if record.get("censusNotAsked"):
+                    # --census-skip-over-ceiling: the census not asked (what
+                    # it would have counted is not known; above the ceiling
+                    # it is discarded, and the pass is the same).
+                    decision_changes.append({
+                        "decision": "censusSkipOverCeiling", "rule": "census-not-asked",
+                        "switch": "--census-skip-over-ceiling",
+                        "block": layout_index(blocks, index), "contextBefore": spans[index][max(0, lo - 4):lo],
+                        "contextAfter": spans[index][lo:lo + 4], "mergedOffset": span_starts[index] + lo,
+                        "before": None, "beforeBy": "not known: without the switch the census is asked, and a count "
+                                                    "within the ceiling is told to the punctuator and holds its answer",
+                        "after": out, "evidence": {"range": [lo, hi], **{
+                            key: record["censusNotAsked"][key] for key in ("engineAPlaces", "ceiling")}}})
             if census_confirms_on:
                 # Two passes that read one mark at the gap between their
                 # stretches (tile_edge_join), where one kept engine A's marks.
@@ -16716,6 +17134,25 @@ def build_parser() -> argparse.ArgumentParser:
                              "neighbour, not the spot.  The reading of the engine the page falls back on stands, "
                              "as that engine read it (on a D3 question, the reading of the engine that read the "
                              "text), with a neighbour-copy doubt")
+    parser.add_argument("--no-engine-a-confirms-first-answer", dest="engine_a_confirms_first_answer",
+                        action="store_false", default=True,
+                        help="switch off (on by default; ROUND4_DEFAULTS) keeping a punctuation pass's first "
+                             "answer, with no retry, where it kept the characters on its own stretch, is "
+                             "outside the census by more than the tolerance, and wrote exactly engine A's "
+                             "marks at every gap of a stretch that is engine A's own reading "
+                             "(first_answer_confirmed: the vocabulary's marks, vertical forms and ASCII "
+                             "brackets folded; never where engine A wrote no mark, nor on engine A's single "
+                             "circle where the book prints doubled circles).  The pass records "
+                             "firstAnswerKept and the page keeps its punctuation-count-mismatch doubt.  Off, "
+                             "such an answer is asked again and a retry that keeps the characters replaces it")
+    parser.add_argument("--no-census-skip-over-ceiling", dest="census_skip_over_ceiling", action="store_false",
+                        default=True,
+                        help="switch off (on by default; ROUND4_DEFAULTS) not asking the census of a block or "
+                             "column group where engine A's own printed marks (the vocabulary's; its markup "
+                             "left out) already hold more places than the largest census believed for the "
+                             "stretch (census_ceiling): a count above the ceiling is discarded, so the pass "
+                             "goes on with the census unknown either way, and records censusNotAsked.  Off, "
+                             "the census is asked of every pass")
     for switch in ROUND4_DEFAULTS:
         parser.add_argument(switch, dest=switch[2:].replace("-", "_"), action="store_true", default=True,
                             help=f"the default (ROUND4_DEFAULTS), accepted so that a script that passes it runs "
@@ -17326,6 +17763,16 @@ def main(argv: Sequence[str] | None = None) -> int:
                     # not made (--census-confirms-engine-a).
                     "punctuationKeptFromEngineA": sum(1 for entry in record.get("punctuationPasses") or []
                                                       if entry.get("engineAKept")),
+                    # First answers kept outside the count, their retry not
+                    # asked (--engine-a-confirms-first-answer; only when on).
+                    **({"firstAnswersKept": sum(1 for entry in record.get("punctuationPasses") or []
+                                                if entry.get("firstAnswerKept"))}
+                       if getattr(arguments, "engine_a_confirms_first_answer", False) else {}),
+                    # Passes whose census was not asked (--census-skip-over-ceiling;
+                    # only when on).
+                    **({"censusNotAsked": sum(1 for entry in record.get("punctuationPasses") or []
+                                              if entry.get("censusNotAsked"))}
+                       if getattr(arguments, "census_skip_over_ceiling", False) else {}),
                     # Questions not asked: furniture by its place (--folio-furniture).
                     "folioFurnitureResolved": sum(
                         1 for d in record.get("engineDisagreements") or []
@@ -17533,6 +17980,23 @@ def main(argv: Sequence[str] | None = None) -> int:
             "window": NEIGHBOUR_WINDOW,
             "notWritten": dict(sum((Counter(r.get("neighbourCopies") or {}) for r in results), Counter()))}}
            if getattr(arguments, "neighbour_guard", False) else {}),
+        # Switch --engine-a-confirms-first-answer, only when on: the passes of
+        # the pages completed in this run whose first answer, outside the
+        # count, was kept because its marks are engine A's - each a
+        # punctuate-retry call not made; each is in its page's
+        # punctuationPasses (firstAnswerKept), decisionChanges and a
+        # punctuation-count-mismatch doubt.
+        **({"engineAConfirmsFirstAnswer": {
+            "firstAnswersKept": sum(r.get("firstAnswersKept", 0) for r in results)}}
+           if getattr(arguments, "engine_a_confirms_first_answer", False) else {}),
+        # Switch --census-skip-over-ceiling, only when on: the passes of the
+        # pages completed in this run whose census was not asked, engine A's
+        # marks alone being above its ceiling - each a census call not made;
+        # each is in its page's punctuationPasses (censusNotAsked) and
+        # decisionChanges.
+        **({"censusSkipOverCeiling": {
+            "censusNotAsked": sum(r.get("censusNotAsked", 0) for r in results)}}
+           if getattr(arguments, "census_skip_over_ceiling", False) else {}),
         # Profile pair classes the variant lists now overrule; the variant
         # sheet needs a rebuilt profile to show them.
         "profilePairClassesStale": getattr(arguments, "stale_pair_classes", []),

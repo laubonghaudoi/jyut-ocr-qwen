@@ -667,7 +667,12 @@ def repair_current(book: Path, arguments: argparse.Namespace) -> tuple[bool, str
         return False, "the last repair ran with other options"
     if (report.get("code") or {}).get("sha256") != repair_book.code_identity()["sha256"]:
         return False, "the repair code changed since"
-    for path, digest in ((report.get("inputs") or {}).get("sha256") or {}).items():
+    digests = (report.get("inputs") or {}).get("sha256") or {}
+    # The report names the files it read: a folder copied from another book is
+    # a repair of that book's files, however unchanged those are.
+    if str((book / ASSEMBLED / "combined-annotated.md").resolve()) not in {str(Path(path).resolve()) for path in digests}:
+        return False, "the repair in the folder is of other files"
+    for path, digest in digests.items():
         try:
             if pp.sha256_file(Path(path)) != digest:
                 return False, f"an input changed since: {path}"
@@ -872,7 +877,7 @@ KINDS: dict[str, tuple[str, str]] = {
     "MARK-FIGURE-LOST": ("text", "引擎 A 讀到嘅數字唔見咗"),
     "run-one-engine": ("text", "數字、拉丁字或者假名淨係一個引擎讀到，頁面冇（冇寫入）"),
     "run-engines-differ": ("text", "兩個引擎喺同一個位讀到唔同嘅數字或者拉丁字，頁面冇（冇寫入）"),
-    "run-no-place": ("text", "兩個引擎都讀到嘅數字或者拉丁字，頁面冇，但擺唔落（標點、結構對唔上）"),
+    "run-no-place": ("text", "兩個引擎都讀到嘅數字、拉丁字，或者表格格仔嘅標點，頁面冇，但擺唔落（標點、結構、格線對唔上）"),
     "arabic-figure-unwritten": ("text", "引擎 A 讀到嘅數字定咗要寫，但寫唔落佢個位"),
     "HEAD-NUMBER-LOST": ("text", "標題冇咗編號"),
     "TOC-NUMBER-LOST": ("text", "目錄項冇編號"),
@@ -922,6 +927,7 @@ KINDS: dict[str, tuple[str, str]] = {
     "table-grids-misaligned": ("tables", "兩個引擎嘅表格格仔唔對行，定唔到跟邊個"),
     "table-unread-confirmed": ("tables", "表入面有兩個引擎都冇讀到、淨係裁決讀到嘅字"),
     "table-orientation-undecided": ("tables", "表嘅方向定唔到"),
+    "table-note-marker-unverified": ("tables", "表格格仔入面嘅註號係引擎 A 讀嘅，冇核過（大過二十嘅圈碼成日讀錯）"),
     "table-rebuild-refused": ("tables", "表重建唔收"),
     "table-rebuilt-unvouched": ("tables", "重建嘅表冇第二個讀法證實"),
     "cell-direction-undecided": ("tables", "表格一格字嘅讀向定唔到"),

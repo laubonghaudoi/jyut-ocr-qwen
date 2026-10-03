@@ -24,7 +24,11 @@ leaves; paragraphs indented two cells, headings three.
 - M-5: the dividers are the pages printing the suffix in display type; a
   page of the run holding the suffix as an ordinary body block is not one.
 - M-6: the contents pages, their lines mapped in order onto the titles, and
-  the contents word; a list page that maps nothing is not contents.
+  the contents word; a list page that maps nothing is not contents.  Nor is
+  a page of the body whose title and date line map (onto the contents, onto
+  another date) between paragraphs that hold most of its text, nor a cover
+  printed again at the end of the book (every mapped line on one page); the
+  contents they stand beside stay the contents.
 - M-7: engine B's mark aliases, and a glyph it writes for engine A's
   bracketed figure on four pages is a figure stand-in, while a character
   engine A skipped once is not, and neither is a CJK numeral engine B reads
@@ -79,6 +83,47 @@ def learn(root: Path, spec, **kwargs) -> dict:
     return rm.learn(ri.load_book(ri.InputPaths.resolve(root, {})))
 
 
+def contents_lookalikes() -> None:
+    """M-6 on page texts alone: a contents, units whose first page is a
+    title, a date line and one long paragraph, and a cover printed again as
+    the last page."""
+    cover = "# 青山文叢全編\n\n春山居士著\n\n青山書局印行\n"
+    titles = {5: "春日遊記", 7: "秋夜讀書", 9: "山居雜詠", 11: "江上聽雨"}
+    texts = {1: cover, 13: cover.lstrip("# ")}
+    texts[3] = "# 目次\n\n" + "\n\n".join(f"{title}……{scan}" for scan, title in titles.items()) + "\n"
+    for scan in (2, 4, 6, 8, 10, 12):
+        texts[scan] = fx.paragraph(scan, 200) + "\n"
+    for scan, title in titles.items():
+        # The first two units open with the same date line: each maps its
+        # title onto the contents and its date onto the other's.
+        date = "三年五月七日\n\n" if scan in (5, 7) else fx.paragraph(scan + 30, 80) + "\n\n"
+        texts[scan] = f"# {title}\n\n{date}{fx.paragraph(scan, 300)}\n"
+    found = rm.learn_contents(texts, [])
+    pages = [run["pages"] for run in found["runs"]]
+    check(pages == [[3]], f"M-6: a unit's first page (its title and date line map, its paragraph holds its text) "
+                          f"and a cover printed again are no contents; the contents stay ({pages})")
+    mapped = [(e["text"], e.get("matchedPage")) for run in found["runs"] for e in run["entries"]]
+    check(mapped == [("目次", None)] + [(title, scan) for scan, title in titles.items()],
+          f"M-6: the contents' entries still map onto the units those pages open ({mapped})")
+    # The cover and its reprint each map every line onto the other: refused
+    # as contents on the count of pages mapped onto, and returned as such
+    # (the repair tool's doubt); the units' first pages, dropped by their
+    # character share, are not.
+    rejected = [(run["pages"], run["bodyPages"]) for run in found.get("rejected") or []]
+    check(rejected == [([1], 1), ([13], 1)],
+          f"M-6: a list-like run refused on the two-page guard is returned under `rejected` ({rejected})")
+    # A title leaf before the contents - two short lines that map onto the
+    # cover over a long paragraph - maps two lines in three and joins the
+    # list-like run; by its own character share it is dropped, and the
+    # contents stay (judged with it, the run would hold too little of its
+    # text in mapped lines and the contents would be lost whole).
+    texts[2] = "青山文叢全編\n\n春山居士著\n\n" + fx.paragraph(2, 200) + "\n"
+    found = rm.learn_contents(texts, [])
+    pages = [run["pages"] for run in found["runs"]]
+    check(pages == [[3]], f"M-6: a title leaf whose two short lines map, over a long paragraph, is dropped from "
+                          f"the contents run by its character share; the contents stay ({pages})")
+
+
 def figure_standins(spec) -> None:
     """Engine A reads （1） after a paragraph's third character on four
     pages, where engine B reads 丁 between two bracket strokes; on four
@@ -101,6 +146,7 @@ def figure_standins(spec) -> None:
 
 
 def main() -> int:
+    contents_lookalikes()
     with tempfile.TemporaryDirectory() as tmp:
         tmp = Path(tmp)
         spec = fx.make_spec()
