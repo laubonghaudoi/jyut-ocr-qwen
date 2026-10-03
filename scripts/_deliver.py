@@ -113,9 +113,11 @@ def _sha256(data: bytes) -> str:
 
 
 @contextlib.contextmanager
-def _locked(book: Path) -> Iterator[None]:
+def _locked(book: Path, blocking: bool = True) -> Iterator[None]:
+    """The delivery lock.  Not BLOCKING: BlockingIOError when a delivery is
+    being written (clean_book.py refuses then, rather than wait)."""
     with open(book / LOCK_NAME, "a") as handle:
-        fcntl.flock(handle, fcntl.LOCK_EX)
+        fcntl.flock(handle, fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB))
         try:
             yield
         finally:

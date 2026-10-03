@@ -44,7 +44,7 @@ the thing it writes - its arguments read with the script's own parser,
 relative paths against the process's working directory, so a proofread run
 that only reads a profile (--profile) is not the profile being built - or
 while any process still writes LOG.  finish_book.py sends its steps' output to
-its own log (BOOK/finish/finish-book.log), whose `[finish] step K of 4` lines
+its own log (BOOK/finish/finish-book.log), whose `[finish] step K of 5` lines
 the running line shows; its RESULT line (in LOG, and in its own log) says how
 it ended.  When none is left, the log's last lines
 say how the step ended: its report line, the book profile's last step, the OCR

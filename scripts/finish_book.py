@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Finish a proofread book in one command: assemble its sealed pages, repair
-the book, take out the page markers, and write the doubt list.
+the book, take out the page markers, write the doubt list, and clean up the
+working files once the book is delivered.
 
     python3 scripts/finish_book.py BOOK
 
@@ -46,6 +47,31 @@ current is kept, and a step that was stopped goes on where it stopped.
    the page's folio) folded last with no detail; and finish/doubts.json with
    every item (`noise` marks the folded ones).  doubts.md names no image: it
    is for the person who reads the book against the PDF.
+5. clean.  Once both copies are beside the PDF (written, or already
+   current there), clean_book.py's default cleanup with the renders kept:
+   the pictures the pipeline cuts again from the renders (phase 3's crops
+   beside the sealed pages, repaired/crops/, book-profile-crops/), the
+   stale assemblies, the pipeline's temporary files and the draft
+   (BOOK/draft.md, and the X-draft.md beside the PDF when the pipeline
+   wrote it) go; the text state stays - the sealed pages, the drafts,
+   repaired/ without its crops, assembled/, the profile, the page
+   manifest, finish/, final.md and doubts.md - so the book can be repaired
+   in place, and so do the renders, because that repair verifies every
+   render against the page manifest and renders cut again from the PDF
+   match only while pdftoppm renders the same bytes (3 pages of a 396-page
+   book did under poppler 26.01 after the OS upgrade of 2026-10-02; under
+   another poppler the book could not be repaired in place at all).
+   --clean-renders removes them too, as `clean_book.py BOOK` on its own
+   does (survey_pdf.py --renders-only puts them back; a run of this
+   command without renders says so, exit 2).  BOOK/cleaned.json records
+   what went.  Measured by du on a 609-page book (2026-10-02): about 460 of
+   635 MB would go, 132 of them the renders; a 396-page book's folder gave
+   back 250 of 411 MB when the command ran, renders included, on a scratch
+   copy.  --keep-work keeps everything; so does --no-deliver, or a copy
+   that could not be written, since the cleanup checks the copies beside
+   the PDF.  A cleanup refused or crashed is a WARNING line, never a
+   failed finish; one stopped part way (a removal failed) is a WARNING
+   line naming what went and the command that finishes it.
 
 final.md and doubts.md are the person's once written: when the command runs
 again and either is not what it last wrote there (the user's corrections,
@@ -64,8 +90,11 @@ written is a WARNING line, never a failure.
 What an agent sees is one line and the paths.  stdout is exactly
 `[finish] RESULT exit=N STATE finish_book.py: ...`, then `final.md: PATH` and
 `doubts.md: PATH` when they are written, then `final.md beside the PDF: PATH`
-and `doubts.md beside the PDF: PATH` for the copies written.  Every step's own output goes to
-BOOK/finish/finish-book.log, which also gets `[finish] step K of 4: ...`
+and `doubts.md beside the PDF: PATH` for the copies written.  The RESULT line
+ends with `; freed M MB` when the fifth step cleaned, `; cleanup stopped` when
+it stopped part way, `; work kept` when it did not run.
+Every step's own output goes to
+BOOK/finish/finish-book.log, which also gets `[finish] step K of 5: ...`
 lines, and `WARNING ...` lines (counted in the RESULT line) for what the
 agent must pass on; scripts/wait_for_run.py BOOK LOG reads them while the run
 goes on (LOG is the file this command's stdout goes to) and reads the RESULT
@@ -103,6 +132,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shlex
 import shutil
 import signal
 import sys
@@ -127,11 +157,12 @@ DOUBTS_JSON = "doubts.json"
 AUDIT_NAME = "final-audit.json"
 WRITTEN_NAME = "written.json"              # the SHA-256 of each final.md and doubts.md it wrote
 WRITTEN_KEPT = 50                          # how many of them it remembers, per file
+CLEANED_NAME = "cleaned.json"              # clean_book.py's record of the fifth step
 LOCK_NAME = ".lock"
 ASSEMBLED = "assembled"
 PARTIAL = ".assembled.partial"
 REPAIRED = "repaired"
-STEPS = 4
+STEPS = 5
 RESULT_PREFIX = "[finish] RESULT"
 STEP_PREFIX = "[finish] step"
 TOOL = "finish_book.py"
@@ -178,6 +209,13 @@ def build_parser() -> argparse.ArgumentParser:
                         help="do not copy final.md and doubts.md beside the book's PDF as X.md and X-doubts.md "
                              "(scripts/_deliver.py: the PDF the page manifest names; a file there the pipeline did "
                              "not write is left alone)")
+    parser.add_argument("--keep-work", action="store_true",
+                        help="keep the working files after the delivery: no fifth step (clean_book.py's cleanup of "
+                             "the crops, the stale assemblies, the temporary files and the draft)")
+    parser.add_argument("--clean-renders", action="store_true",
+                        help="the fifth step removes the renders too (by default they stay: a repair in place needs "
+                             "renders that hash to the page manifest's, and survey_pdf.py --renders-only gives those "
+                             "back only under the same pdftoppm)")
     return parser
 
 
@@ -346,6 +384,21 @@ def resolve_inputs(book: Path, arguments: argparse.Namespace) -> Inputs:
         candidates += [book / "renders", book / "renders" / "renders"]
         renders = next((Path(os.path.realpath(c)) for c in candidates if _page_numbers(c, "png")), None)
         if renders is None:
+            if (book / CLEANED_NAME).is_file():
+                # clean_book.py removed them (cleaned.json says when); the line is the
+                # command to run, with the manifest's PDF when it can be read.
+                pdf = "PDF"
+                with contextlib.suppress(OSError, ValueError, AttributeError, TypeError):
+                    named = json.loads(manifest.read_text(encoding="utf-8")).get("source_pdf")
+                    if isinstance(named, str) and named:
+                        path = Path(named).expanduser()
+                        pdf = shlex.quote(str(path if path.is_absolute() else manifest.parent / path))
+                raise FinishError(EXIT_USAGE, f"no folder of page renders (page-NNNN.png): they were removed after "
+                                              f"the book was finished ({CLEANED_NAME}) - put them back with `python3 "
+                                              f"scripts/survey_pdf.py {pdf} {shlex.quote(str(manifest.parent))} "
+                                              "--renders-only` (the page manifest's source_pdf and folder; it "
+                                              "renders the missing pages and verifies them against the manifest), "
+                                              "then run this command again")
             raise FinishError(EXIT_USAGE, "no folder of page renders (page-NNNN.png) found - name it with --renders")
     # assembled/ is moved aside whole when it no longer matches the sealed
     # pages (and .assembled.partial/ is deleted): an input there would go
@@ -1453,16 +1506,27 @@ def run(book: Path, arguments: argparse.Namespace, client: Any, report: dict[str
     if kept:
         line += f"; the edited {' and '.join(kept)} kept (not in the new files)"
     outputs = [f"{FINAL}: {book / FINAL}", f"{DOUBTS}: {book / DOUBTS}"]
+    both = False
     if not arguments.no_deliver:
-        outputs += deliver_beside_pdf(book, inputs, report, log)
+        copies, both = deliver_beside_pdf(book, inputs, report, log)
+        outputs += copies
+    cleaned = step(5, "clean", "clean up the working files (clean_book.py)",
+                   lambda: clean_work(book, inputs, arguments, both, log))
+    if cleaned["status"] == "cleaned":
+        line += f"; freed {cleaned['freed']}"
+    elif cleaned["status"] == "stopped":
+        line += "; cleanup stopped"
+    else:
+        line += "; work kept"
     return EXIT_DONE, line, outputs
 
 
-def deliver_beside_pdf(book: Path, inputs: Inputs, report: dict[str, Any], log: Log) -> list[str]:
+def deliver_beside_pdf(book: Path, inputs: Inputs, report: dict[str, Any], log: Log) -> tuple[list[str], bool]:
     """final.md and doubts.md copied beside the book's PDF as X.md and
     X-doubts.md (scripts/_deliver.py), each `final.md` in the doubt list
     reading X.md.  A copy that cannot be written is a WARNING line (the agent
-    passes it on) and never a failure: the book's own files stand."""
+    passes it on) and never a failure: the book's own files stand.  Returns
+    the lines for stdout and whether both copies were written."""
     final = (book / FINAL).read_bytes()
     pdf, _why = _deliver.source_pdf(book, inputs.page_manifest)
     final_name = _deliver.copy_name(pdf, "final") if pdf is not None else FINAL
@@ -1483,7 +1547,56 @@ def deliver_beside_pdf(book: Path, inputs: Inputs, report: dict[str, Any], log: 
                             f"{copy.path.name} does not hold those changes")
         else:
             log.warning(f"{name} {copy.line()}")
-    return lines
+    return lines, all(copy.written for copy in copies)
+
+
+# --- step 5: the working files ----------------------------------------------------------------
+
+def clean_work(book: Path, inputs: Inputs, arguments: argparse.Namespace, delivered: bool, log: Log) -> dict[str, Any]:
+    """clean_book.py's default cleanup with the renders kept (--clean-renders:
+    removed too), only once both copies are beside the PDF (its checks read
+    them there: X.md, X-doubts.md, and final.md the version copied).  Never
+    --all: wait_for_run.py and the agent read finish/ after the RESULT line.
+    The renders stay because the repair in place the text state is kept for
+    verifies every render against the page manifest, and renders cut again
+    match only while pdftoppm renders the same bytes (found in review of the
+    made-up book's cleanup, check_clean_book; measured: 3 pages of a
+    396-page book did under poppler 26.01 after the OS upgrade of
+    2026-10-02).  A cleanup refused or crashed is a WARNING line - the agent
+    passes it on - and never a failed finish; one stopped part way is a
+    WARNING line too, naming what went and the command that finishes it."""
+    if arguments.keep_work:
+        return {"status": "kept", "why": "--keep-work"}
+    if arguments.no_deliver:
+        return {"status": "kept", "why": "--no-deliver: the cleanup checks the copies beside the PDF"}
+    if not delivered:
+        return {"status": "kept", "why": "not both copies were written beside the PDF"}
+    import clean_book
+    renders = "removed" if arguments.clean_renders else "kept"
+    again = f"python3 scripts/clean_book.py {shlex.quote(str(book))}" + ("" if arguments.clean_renders else " --keep-renders")
+    try:
+        result = clean_book.clean(book, after_finish=True, inputs=inputs.as_dict(),
+                                  keep_renders=not arguments.clean_renders)
+    except Exception as error:  # noqa: BLE001 - never a failed finish
+        import traceback
+        traceback.print_exc(file=log.handle)
+        log.warning(f"the cleanup crashed ({type(error).__name__}: {_clip(str(error), 160)}); the working files are "
+                    f"kept - {again}")
+        return {"status": "kept", "why": f"crashed: {type(error).__name__}", "renders": "kept"}
+    for text in result.lines:
+        log.line(text)
+    # Not with the word RESULT: wait_for_run.py reads this command's RESULT line from the log.
+    log.line(f"clean_book.py exit={result.code}: {result.why}")
+    if result.code == clean_book.EXIT_STOPPED:
+        why = result.why.removesuffix(" - run the same command again")
+        log.warning(f"the cleanup stopped part way: {why}; the rest goes with {again}")
+        return {"status": "stopped", "why": result.why, "bytesFreed": result.bytes_freed,
+                "items": len(result.removed), "renders": renders}
+    if result.code != clean_book.EXIT_DONE:
+        log.warning(f"the cleanup did not run: {result.why}; the working files are kept - {again} says the same")
+        return {"status": "kept", "why": result.why, "renders": "kept"}
+    return {"status": "cleaned", "bytesFreed": result.bytes_freed, "freed": clean_book.mb(result.bytes_freed),
+            "items": len(result.removed), "renders": renders, "cleanedJson": str(book / CLEANED_NAME)}
 
 
 def _now() -> str:

@@ -20,18 +20,28 @@ verified blank.
 
 Usage:
     python3 scripts/survey_pdf.py SOURCE.pdf OUTPUT_DIR [--dpi 300] [--jobs N]
+    python3 scripts/survey_pdf.py SOURCE.pdf OUTPUT_DIR --renders-only
 
 OUTPUT_DIR is the book folder: the renders go to OUTPUT_DIR/renders/, the two
 files beside them.  Rendering and measuring run --jobs processes at a time
 (default: the machine's CPUs); the renders, the manifest and the report are
 the same bytes whatever the number (render_runs says why), so a survey made
 in slices seals exactly what one made in one call would.
+
+--renders-only puts the renders back after clean_book.py removed them: the
+pages missing from OUTPUT_DIR/renders/ are rendered again, at the dpi the
+survey report recorded, and every page's render is verified against the
+manifest's render_sha256; the manifest and the report are not rewritten
+(renders_only says why that matters).  They match only under a pdftoppm
+that renders the same bytes as the survey's, whose version the report
+records (render.tool_version); a mismatch names both versions.
 """
 
 from __future__ import annotations
 
 import argparse
 import concurrent.futures
+import contextlib
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import functools
@@ -111,6 +121,25 @@ def require_tool(name: str) -> str:
     if not path:
         raise SurveyError(f"{name} is required (install poppler-utils)")
     return path
+
+
+def pdftoppm_version() -> str:
+    """The first line of `pdftoppm -v` (poppler's version), recorded in the
+    survey report and in clean_book.py's cleaned.json: render_runs says the
+    same pdftoppm renders the same bytes, and renders cut again after a
+    cleanup must hash to the manifest's, which another poppler may not give
+    (3 pages of a 396-page book did under 26.01.0 after the OS upgrade of
+    2026-10-02 - a measurement, not a guarantee), so a mismatch has to name
+    both versions."""
+    tool = shutil.which("pdftoppm")
+    if not tool:
+        return "pdftoppm not installed"
+    try:
+        said = subprocess.run([tool, "-v"], capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return f"{tool} (version unknown)"
+    first = next((line.strip() for line in (said.stderr + said.stdout).splitlines() if line.strip()), "")
+    return first or f"{tool} (version unknown)"
 
 
 def pdf_facts(pdf_path: Path) -> dict[str, Any]:
@@ -390,7 +419,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("source_pdf", type=Path)
     parser.add_argument("output_directory", type=Path)
-    parser.add_argument("--dpi", type=int, default=DEFAULT_DPI)
+    parser.add_argument("--dpi", type=int, default=None, help=f"render resolution (default {DEFAULT_DPI}; "
+                        f"--renders-only: the survey report's)")
     parser.add_argument(
         "--last-page",
         type=int,
@@ -408,6 +438,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="re-render pages that already exist",
     )
     parser.add_argument(
+        "--renders-only",
+        action="store_true",
+        help="render only the pages missing from OUTPUT_DIR/renders/ for the page manifest already in "
+             "OUTPUT_DIR (after clean_book.py), verify every page's render against its render_sha256, and "
+             "rewrite nothing else - no manifest, no report; exit 2 when a render differs or the PDF is not "
+             "the manifest's",
+    )
+    parser.add_argument(
         "--jobs",
         type=int,
         default=DEFAULT_JOBS,
@@ -418,13 +456,87 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def renders_only(pdf_path: Path, pdf_sha: str, output_directory: Path, renders_dir: Path,
+                 selected: list[int] | None, dpi: int | None, jobs: int, overwrite: bool) -> int:
+    """--renders-only: the renders of a surveyed book, cut again after
+    clean_book.py removed them.  The page manifest already in OUTPUT_DIR
+    must be this PDF's (source_sha256).  The pages SELECTED (default: every
+    page the manifest lists) with no render are rendered at DPI, else at
+    the dpi the survey report recorded, else DEFAULT_DPI; then every
+    selected page's render is verified against the manifest's
+    render_sha256.  Neither the manifest nor the report is rewritten: a
+    survey run would, with a new generated_at - which makes the assembly's
+    byte copy of the manifest stale and the repair's inputs changed - and
+    without the marker_expected marks a person added (one corpus book
+    carries three).  Exit 2 when a render differs or is missing:
+    render_runs says the same pdftoppm renders the same bytes, so a
+    difference means another pdftoppm or dpi, and the sealed pages'
+    renderSha256 would not match it either."""
+    manifest_path = output_directory / MANIFEST_NAME
+    try:
+        manifest = json.loads(manifest_path.read_bytes().decode("utf-8"))
+    except (OSError, ValueError) as error:
+        raise SurveyError(f"--renders-only needs the page manifest at {manifest_path} ({error})")
+    if not isinstance(manifest, dict) or manifest.get("source_sha256") != pdf_sha:
+        raise SurveyError(f"{pdf_path} is not the PDF {manifest_path} was made from (its SHA-256 differs)")
+    records = {p["scan_page"]: p for p in manifest.get("pages") or []
+               if isinstance(p, dict) and isinstance(p.get("scan_page"), int)}
+    if not records:
+        raise SurveyError(f"{manifest_path} lists no page")
+    wanted = sorted(records) if selected is None else sorted(selected)
+    recorded: dict[str, Any] = {}
+    with contextlib.suppress(OSError, ValueError, TypeError, AttributeError):
+        recorded = json.loads((output_directory / REPORT_NAME).read_text(encoding="utf-8")).get("render") or {}
+    if dpi is None:
+        dpi = DEFAULT_DPI
+        with contextlib.suppress(ValueError, KeyError, TypeError):
+            dpi = int(recorded["dpi"])
+    renders_dir.mkdir(parents=True, exist_ok=True)
+    existing = {
+        int(p.stem.split("-")[1]) for p in renders_dir.glob("page-*.png") if p.stem.split("-")[-1].isdigit()
+    }
+    todo = wanted if overwrite else sorted(set(wanted) - existing)
+    if todo:
+        runs = contiguous_runs(todo)
+        shown = ", ".join(f"{a}" if a == b else f"{a}-{b}" for a, b in runs[:6])
+        print(f"  rendering  : {len(todo)} page(s) [{shown}] at {dpi} dpi, {jobs} pdftoppm process(es) at a time",
+              flush=True)
+        render_runs(pdf_path, renders_dir, dpi, runs, jobs)
+    else:
+        print(f"  rendering  : all {len(wanted)} selected page(s) already present", flush=True)
+    differ, missing, unlisted = [], [], []
+    for scan in wanted:
+        record = records.get(scan)
+        path = renders_dir / f"page-{scan:04d}.png"
+        if record is None:
+            unlisted.append(scan)
+        elif not path.is_file():
+            missing.append(scan)
+        elif sha256_file(path) != record.get("render_sha256"):
+            differ.append(scan)
+    verified = len(wanted) - len(differ) - len(missing) - len(unlisted)
+    print(f"  verified   : {verified} of {len(wanted)} page(s) hash to {manifest_path.name}'s render_sha256; "
+          f"{manifest_path.name} and {REPORT_NAME} not rewritten", flush=True)
+    if unlisted:
+        print(f"  NOTE {len(unlisted)} selected page(s) not in the manifest, so not verified: {unlisted[:10]}",
+              flush=True)
+    if differ or missing:
+        surveyed = recorded.get("tool_version") or "not recorded (a survey before 2026-10-02)"
+        raise SurveyError(f"{len(differ)} render(s) differ from the manifest {differ[:10]}, {len(missing)} missing "
+                          f"{missing[:10]}: another pdftoppm or dpi than the survey's? (pdftoppm now: "
+                          f"{pdftoppm_version()}; at the survey: {surveyed}; the sealed pages' renderSha256 would "
+                          "not match them either, so the book cannot be repaired in place until they do)")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     arguments = build_parser().parse_args(argv)
+    dpi = DEFAULT_DPI if arguments.dpi is None else arguments.dpi
     try:
         pdf_path = arguments.source_pdf.expanduser().resolve()
         if not pdf_path.is_file():
             raise SurveyError(f"source PDF does not exist: {pdf_path}")
-        if arguments.dpi < 72:
+        if dpi < 72:
             raise SurveyError("--dpi below 72 is too low for small CJK glyphs")
         if arguments.jobs < 1:
             raise SurveyError("--jobs must be at least 1")
@@ -455,6 +567,10 @@ def main(argv: list[str] | None = None) -> int:
         print(f"  source     : {pdf_path.name} ({page_count} pages)", flush=True)
         pdf_sha = sha256_file(pdf_path)
         print(f"  sha256     : {pdf_sha[:16]}…", flush=True)
+        if arguments.renders_only:
+            return renders_only(pdf_path, pdf_sha, output_directory, renders_dir,
+                                selected if (arguments.pages or arguments.last_page) else None,
+                                arguments.dpi, arguments.jobs, arguments.overwrite)
 
         existing = {
             int(p.stem.split("-")[1])
@@ -469,10 +585,10 @@ def main(argv: list[str] | None = None) -> int:
             shown = ", ".join(f"{a}" if a == b else f"{a}-{b}" for a, b in runs[:6])
             if len(runs) > 6:
                 shown += f", … {len(runs) - 6} more runs"
-            print(f"  rendering  : {len(todo)} page(s) [{shown}] at {arguments.dpi} dpi, "
+            print(f"  rendering  : {len(todo)} page(s) [{shown}] at {dpi} dpi, "
                   f"{arguments.jobs} pdftoppm process(es) at a time",
                   flush=True)
-            render_runs(pdf_path, renders_dir, arguments.dpi, runs, arguments.jobs)
+            render_runs(pdf_path, renders_dir, dpi, runs, arguments.jobs)
         else:
             print(f"  rendering  : all {len(wanted)} selected page(s) already present",
                   flush=True)
@@ -518,7 +634,8 @@ def main(argv: list[str] | None = None) -> int:
         "surveyed_pages": len(pages),
         "render": {
             "tool": "pdftoppm",
-            "dpi": arguments.dpi,
+            "tool_version": pdftoppm_version(),
+            "dpi": dpi,
             "format": "png",
             "directory": str(renders_dir),
             "name_pattern": "page-NNNN.png",

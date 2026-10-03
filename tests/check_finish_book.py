@@ -237,13 +237,16 @@ def resumed_ok(book: Path, asked: int) -> bool:
     return 0 < asked < 10 and reused > 0 and data["model"]["asked"] == asked and asked + reused == 10
 
 
-def finish(book: Path, *argv: str, client: Any = None, deliver: bool = False) -> tuple[int, list[str]]:
+def finish(book: Path, *argv: str, client: Any = None, deliver: bool = False,
+           keep_work: bool = True) -> tuple[int, list[str]]:
     """finish_book.main on BOOK; without DELIVER, --no-deliver (the fixture's
-    manifest names a PDF that does not exist: its copies are delivery_checks')."""
+    manifest names a PDF that does not exist: its copies are delivery_checks').
+    With KEEP_WORK, --keep-work: the fifth step would remove the renders a
+    second run here needs (the step itself is check_clean_book's)."""
     out = io.StringIO()
     with contextlib.redirect_stdout(out):
-        code = finish_book.main([str(book), "--workers", "1", *argv, *(() if deliver else ("--no-deliver",))],
-                                client=client)
+        code = finish_book.main([str(book), "--workers", "1", *argv, *(() if deliver else ("--no-deliver",)),
+                                 *(("--keep-work",) if keep_work else ())], client=client)
     return code, out.getvalue().splitlines()
 
 
@@ -445,7 +448,7 @@ def refusal_checks(tmp: Path) -> None:
     (book / "finish").mkdir()
     # What the run that holds the lock has written so far.
     own_log = book / "finish" / finish_book.LOG_NAME
-    own_log.write_text("[finish] 2026-01-01T00:00:00Z finish_book.py BOOK\n[finish] step 2 of 4: repair the book "
+    own_log.write_text("[finish] 2026-01-01T00:00:00Z finish_book.py BOOK\n[finish] step 2 of 5: repair the book "
                        "(repair_book.py, questions to the model)\n", encoding="utf-8")
     own_report = book / "finish" / finish_book.REPORT_NAME
     own_report.write_text('{"tool": "finish_book.py", "steps": {}}\n', encoding="utf-8")
@@ -588,7 +591,7 @@ def process_checks(tmp: Path) -> None:
         while finish_book._count_lines(answers) < 2 and process.poll() is None and time.monotonic() < stop:
             time.sleep(0.1)
         code, line = wait(book, log, 1)
-        check(code == 75 and "RUNNING finish_book.py: step 2 of 4 (repair the book" in line
+        check(code == 75 and "RUNNING finish_book.py: step 2 of 5 (repair the book" in line
               and "model answer(s)" in line,
               f"while the repair asks: the wait says RUNNING, the step and the answers so far ({code}: {line})")
         process.send_signal(signal.SIGTERM)
