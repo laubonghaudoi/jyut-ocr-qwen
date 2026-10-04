@@ -487,7 +487,7 @@ def run(arguments: argparse.Namespace, client: Any | None = None) -> int:
         # Without them no page is measured and no crop is cut: the rules that
         # read the print's geometry would be off with nothing said.
         print(f"repair_book needs numpy and Pillow in the interpreter that runs it ({error}); "
-              f"run it with the skill's Python", file=sys.stderr)
+              f"install them: sudo apt install python3-numpy python3-pil", file=sys.stderr)
         return EXIT_INPUTS
     files = ri.input_files(book)
     hashes_before = ri.hash_inputs(files)

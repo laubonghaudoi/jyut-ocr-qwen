@@ -16,6 +16,7 @@ engines only and calibrated for long books, financial tables and measured accura
 
 ## Install
 
+    sudo apt install python3-numpy python3-pil   # the scripts run on the system python3
     ln -s "$(pwd)" ~/.qwen/skills/jyut-ocr-qwen
 
 ## Regression

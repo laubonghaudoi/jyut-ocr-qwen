@@ -66,10 +66,12 @@ Usage:
 
 from __future__ import annotations
 
+import concurrent.futures
 import contextlib
 import fcntl
 import io
 import json
+import multiprocessing
 import os
 from pathlib import Path
 import shlex
@@ -307,10 +309,19 @@ def refusal_checks(tmp: Path) -> None:
     with child(str(render), cwd=book, opens=render) as process:
         refused(f"a process naming the book folder with a render open (pid {process.pid})",
                 f"a run is still working on this book (pid {process.pid}", "--dry-run")
-        refused("the same, not a dry run", f"(pid {process.pid} (python): its working directory is {book})")
+        refused("the same, not a dry run", f"(pid {process.pid} ({os.path.basename(sys.executable)}): its working directory is {book})")
     with child("scripts/proofread_pages.py", str(book / "renders"), str(book / "proofread"), cwd=tmp) as process:
         refused("a pipeline command given the book on its command line, nothing open",
                 f"(pid {process.pid} (proofread_pages.py): the book folder is on its command line)")
+    # A process pool's helper is not another run: Python 3.14's forkserver outlives the pool and carries its parent's
+    # command line, which refused finish_book.py's cleanup whenever it ran with more than one worker.
+    argv, sys.argv = sys.argv, ["scripts/finish_book.py", str(book)]
+    try:
+        with concurrent.futures.ProcessPoolExecutor(1, mp_context=multiprocessing.get_context("forkserver")) as pool:
+            pool.submit(abs, 1).result()
+    finally:
+        sys.argv = argv
+    check(clean_book.working(book) is None, "a process pool's forkserver with the book on its command line is not another run")
     log = book / "finish.log"
     with child("scripts/wait_for_run.py", str(book), str(log), cwd=tmp, opens=log), child(cwd=book), \
             child(str(log), cwd=tmp, opens=log), child(str(book / "finish" / "finish-book.log"), cwd=tmp,

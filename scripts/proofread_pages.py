@@ -17056,7 +17056,7 @@ def build_parser() -> argparse.ArgumentParser:
                              "book with no preference), instead of the preference or the 裁決 "
                              "question; see tie_break_eligible and blind_read_segment")
     parser.add_argument("--census-confirms-engine-a", action="store_true",
-                        help="switch C1 (off by default: measured 2026-09-30, 12% faster on a book but a layout lost on pages "
+                        help="switch C1 (off by default: measured 2026-09-30, 12%% faster on a book but a layout lost on pages "
                              "where it fired; the user's decision): a tile whose census counted marks, no doubled "
                              "circle and no leader dot, where engine A's marks - a run of dashes one - "
                              "hold exactly as many places, each with a sure place in the merged text, "

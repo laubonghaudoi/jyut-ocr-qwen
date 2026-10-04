@@ -489,6 +489,9 @@ def working(book: Path) -> str | None:
         if not raw or state in "ZX":
             continue                # a kernel thread; gone, or exited and not yet reaped
         argv = [word.decode("utf-8", "surrogateescape") for word in raw.rstrip(b"\0").split(b"\0")]
+        code = argv[argv.index("-c") + 1] if "-c" in argv[1:-1] else ""
+        if "from multiprocessing." in code:
+            continue                # a process pool's helper: Python 3.14's forkserver carries its parent's command line
         script = next((os.path.basename(word) for word in argv
                        if os.path.basename(word) in COMMANDS or os.path.basename(word) in READERS), None)
         if script in READERS:

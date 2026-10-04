@@ -624,6 +624,10 @@ def swap_and_run(arguments: argparse.Namespace, runner: list[str], env: dict[str
 
     runner_code = 1
     interrupted: Interrupted | None = None
+    # Anything else that escapes the run, raised again once the server is
+    # back - or dropped for exit 3 when it is not, as a `return` in a
+    # `finally` did before Python 3.14 warned about it (PEP 765).
+    unexpected: BaseException | None = None
     try:
         watchdog_fd = start_watchdog(arguments)
         tell_watchdog("releasing")
@@ -648,24 +652,27 @@ def swap_and_run(arguments: argparse.Namespace, runner: list[str], env: dict[str
         runner_code = 2
     except Interrupted as signal_exit:
         interrupted = signal_exit
-    finally:
-        # Handlers stay in place (ignoring signals) until the server is back.
-        state["restoring"] = True
-        ok = restore()
-        for sig, handler in previous.items():
-            signal.signal(sig, handler)
-        if watchdog_fd is not None:
-            # Closing without "restored" hands the restore to the watchdog.
-            os.close(watchdog_fd)
-        if not ok:
-            # Losing the backend is worse than a failed OCR pass; say so loudly.
-            say(
-                "ERROR the GPU server was NOT restored (the watchdog will retry). "
-                "If it stays down, restart it manually before continuing:\n"
-                f"       {arguments.restore_cmd}",
-                error=True,
-            )
-            return 3
+    except BaseException as error:  # noqa: BLE001 - re-raised below once the server is back
+        unexpected = error
+    # Handlers stay in place (ignoring signals) until the server is back.
+    state["restoring"] = True
+    ok = restore()
+    for sig, handler in previous.items():
+        signal.signal(sig, handler)
+    if watchdog_fd is not None:
+        # Closing without "restored" hands the restore to the watchdog.
+        os.close(watchdog_fd)
+    if not ok:
+        # Losing the backend is worse than a failed OCR pass; say so loudly.
+        say(
+            "ERROR the GPU server was NOT restored (the watchdog will retry). "
+            "If it stays down, restart it manually before continuing:\n"
+            f"       {arguments.restore_cmd}",
+            error=True,
+        )
+        return 3
+    if unexpected is not None:
+        raise unexpected
 
     if interrupted is not None:
         return 128 + int(interrupted.args[0])
